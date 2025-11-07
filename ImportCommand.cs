@@ -183,15 +183,19 @@ namespace PlateauRevitImporter
 
                 if (existingOffset != null)
                 {
+#if DEBUG
                     // 追加インポート: 既存のオフセットを使用
                     System.Diagnostics.Debug.WriteLine($"追加インポート: 既存オフセットを使用 X={existingOffset.OffsetX:F2}m, Y={existingOffset.OffsetY:F2}m, Z={existingOffset.OffsetZ:F2}m");
+#endif
                     offset = existingOffset;
                     isAdditionalImport = true;
                 }
                 else
                 {
+#if DEBUG
                     // 初回インポート: 新しいオフセットを計算
                     System.Diagnostics.Debug.WriteLine("初回インポート: 新しいオフセットを計算");
+#endif
                     CityGMLParser.XYZ bboxMin = CityGMLParser.CalculateBoundingBoxMin(buildings);
                     offset = CoordinateConverter.CalculateNewOffset(bboxMin);
                     isAdditionalImport = false;

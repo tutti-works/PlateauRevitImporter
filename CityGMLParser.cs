@@ -67,20 +67,23 @@ namespace PlateauRevitImporter
                     throw new Exception("XMLファイルのルート要素が見つかりません");
 
                 // bldg:Building要素をすべて取得（名前空間のバリエーションに対応）
+                // 最適化: Building要素のみを厳密に抽出し、即座にリスト化してキャッシュ
                 var buildingElements = doc.Descendants()
                     .Where(e => e.Name.LocalName == "Building" &&
                                 (e.Name.Namespace.NamespaceName.Contains("building") ||
-                                 e.Name.Namespace.NamespaceName.Contains("bldg")));
+                                 e.Name.Namespace.NamespaceName.Contains("bldg")))
+                    .ToList();
 
-                if (!buildingElements.Any())
+                // フォールバック: 名前空間が見つからない場合のみ緩い条件で再検索
+                if (buildingElements.Count == 0)
                 {
-                    // Buildingが見つからない場合、他の可能性を探す
                     buildingElements = doc.Descendants()
-                        .Where(e => e.Name.LocalName.Contains("Building"));
+                        .Where(e => e.Name.LocalName == "Building")
+                        .ToList();
                 }
 
                 int processedBuildings = 0;
-                int totalBuildings = buildingElements.Count();
+                int totalBuildings = buildingElements.Count;
 
                 foreach (var buildingElement in buildingElements)
                 {
@@ -95,8 +98,11 @@ namespace PlateauRevitImporter
 
                         building.BuildingId = idAttr?.Value ?? $"Building_{processedBuildings}";
 
+                        // 最適化: すべてのDescendantsを一度だけ取得（キャッシュ）
+                        var allDescendants = buildingElement.Descendants().ToList();
+
                         // 最高LODを検出（LOD2 > LOD1）
-                        int maxLod = GetMaxLodLevel(buildingElement);
+                        int maxLod = GetMaxLodLevel(allDescendants);
 
                         // ユーザーが選択したLODに基づいて使用するLODを決定
                         int useLod = targetLod;
@@ -111,10 +117,12 @@ namespace PlateauRevitImporter
                             useLod = 1;
                         }
 
+#if DEBUG
                         System.Diagnostics.Debug.WriteLine($"建物 {building.BuildingId}: 最高LOD={maxLod}, 使用LOD={useLod}");
+#endif
 
                         // 指定されたLODのposList要素のみを抽出（LOD0は常に除外）
-                        var posLists = buildingElement.Descendants()
+                        var posLists = allDescendants
                             .Where(e => (e.Name.LocalName == "posList" || e.Name.LocalName == "coordinates") &&
                                        !IsLOD0Element(e) &&
                                        GetLodLevel(e) == useLod);
@@ -131,8 +139,10 @@ namespace PlateauRevitImporter
                             }
                             catch (Exception ex)
                             {
+#if DEBUG
                                 // 個別の面の解析エラーはスキップ
                                 System.Diagnostics.Debug.WriteLine($"面の解析エラー: {ex.Message}");
+#endif
                             }
                         }
 
@@ -153,8 +163,10 @@ namespace PlateauRevitImporter
                     }
                     catch (Exception ex)
                     {
+#if DEBUG
                         // 個別の建物の解析エラーはスキップして続行
                         System.Diagnostics.Debug.WriteLine($"建物の解析エラー: {ex.Message}");
+#endif
                     }
                 }
 
@@ -182,12 +194,13 @@ namespace PlateauRevitImporter
         /// <summary>
         /// 建物要素内の最高LODレベルを取得
         /// </summary>
-        private static int GetMaxLodLevel(XElement buildingElement)
+        /// <param name="descendants">建物要素の子孫要素リスト（最適化のためキャッシュ済み）</param>
+        private static int GetMaxLodLevel(List<XElement> descendants)
         {
             int maxLod = 0;
 
-            // すべての子孫要素を調査
-            foreach (var element in buildingElement.Descendants())
+            // すべての子孫要素を調査（既にリスト化済み）
+            foreach (var element in descendants)
             {
                 string localName = element.Name.LocalName;
 
@@ -268,21 +281,25 @@ namespace PlateauRevitImporter
                     double.TryParse(values[i + 1], out double lon) &&
                     double.TryParse(values[i + 2], out double z))
                 {
+#if DEBUG
                     // デバッグ: 最初の3点の生座標（緯度・経度）をログ出力
                     if (points.Count < 3)
                     {
                         System.Diagnostics.Debug.WriteLine($"CityGML生座標（緯度・経度） #{points.Count + 1}: 緯度={lat:F8}, 経度={lon:F8}, 高さ={z:F2}m");
                     }
+#endif
 
                     // 緯度・経度をメートル単位の平面座標に変換
                     XYZ convertedPoint = ConvertLatLonToMeters(lat, lon, z);
                     points.Add(convertedPoint);
 
+#if DEBUG
                     // デバッグ: 変換後の座標をログ出力
                     if (points.Count <= 3)
                     {
                         System.Diagnostics.Debug.WriteLine($"  → 変換後（メートル） #{points.Count}: X={convertedPoint.X:F2}m, Y={convertedPoint.Y:F2}m, Z={convertedPoint.Z:F2}m");
                     }
+#endif
                 }
             }
 
@@ -394,11 +411,13 @@ namespace PlateauRevitImporter
             if (totalPoints == 0)
                 throw new ArgumentException("有効な座標点が見つかりません");
 
+#if DEBUG
             // デバッグ: 計算されたバウンディングボックス最小点をログ出力
             System.Diagnostics.Debug.WriteLine($"");
             System.Diagnostics.Debug.WriteLine($"=== バウンディングボックス最小点（メートル単位） ===");
             System.Diagnostics.Debug.WriteLine($"X={minX:F2}m, Y={minY:F2}m, Z={minZ:F2}m");
             System.Diagnostics.Debug.WriteLine($"総頂点数: {totalPoints}");
+#endif
 
             return new XYZ(minX, minY, minZ);
         }

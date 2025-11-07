@@ -81,11 +81,13 @@ namespace PlateauRevitImporter
             // 初回も追加も同じ原点になる
             var offset = new CoordinateOffset(0, 0, 0);
 
+#if DEBUG
             // デバッグ: 計算されたオフセットをログ出力
             System.Diagnostics.Debug.WriteLine($"=== 計算されたオフセット（固定参照点方式） ===");
             System.Diagnostics.Debug.WriteLine($"X={offset.OffsetX:F2}m, Y={offset.OffsetY:F2}m, Z={offset.OffsetZ:F2}m");
             System.Diagnostics.Debug.WriteLine($"参照点からの相対座標を直接使用（追加インポート対応）");
             System.Diagnostics.Debug.WriteLine($"");
+#endif
 
             return offset;
         }
