@@ -101,8 +101,8 @@ namespace PlateauRevitImporter
                 else
                 {
                     // 初回インポート: 新しいオフセットを計算
-                    CityGMLParser.XYZ centroid = CityGMLParser.CalculateCentroid(buildings);
-                    offset = CoordinateConverter.CalculateNewOffset(centroid);
+                    CityGMLParser.XYZ bboxMin = CityGMLParser.CalculateBoundingBoxMin(buildings);
+                    offset = CoordinateConverter.CalculateNewOffset(bboxMin);
                     isAdditionalImport = false;
                 }
 

@@ -168,6 +168,12 @@ namespace PlateauRevitImporter
                     double.TryParse(values[i + 2], out double z))
                 {
                     points.Add(new XYZ(x, y, z));
+
+                    // デバッグ: 最初の3点の生座標をログ出力（1回のみ）
+                    if (points.Count <= 3)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"CityGML生座標 #{points.Count}: X={x:F2}m, Y={y:F2}m, Z={z:F2}m");
+                    }
                 }
             }
 
@@ -175,15 +181,17 @@ namespace PlateauRevitImporter
         }
 
         /// <summary>
-        /// すべての建物の座標から基準点を計算
-        /// X/Yは中心、Zは最小値（地面レベル）を使用
+        /// すべての建物の座標からバウンディングボックスの最小点を計算
+        /// X/Y/Z すべて最小値を使用（南西の角 + 地面レベル）
+        /// これにより、オフセット後も建物の相対的な位置関係が保持される
         /// </summary>
-        public static XYZ CalculateCentroid(List<BuildingGeometry> buildings)
+        public static XYZ CalculateBoundingBoxMin(List<BuildingGeometry> buildings)
         {
             if (buildings.Count == 0)
                 throw new ArgumentException("建物データが空です");
 
-            double sumX = 0, sumY = 0;
+            double minX = double.MaxValue;
+            double minY = double.MaxValue;
             double minZ = double.MaxValue;
             int totalPoints = 0;
 
@@ -193,9 +201,9 @@ namespace PlateauRevitImporter
                 {
                     foreach (var point in surface)
                     {
-                        sumX += point.X;
-                        sumY += point.Y;
-                        minZ = Math.Min(minZ, point.Z); // Zは最小値を使用
+                        minX = Math.Min(minX, point.X);
+                        minY = Math.Min(minY, point.Y);
+                        minZ = Math.Min(minZ, point.Z);
                         totalPoints++;
                     }
                 }
@@ -204,11 +212,10 @@ namespace PlateauRevitImporter
             if (totalPoints == 0)
                 throw new ArgumentException("有効な座標点が見つかりません");
 
-            return new XYZ(
-                sumX / totalPoints,
-                sumY / totalPoints,
-                minZ  // Zは最小値（地面レベル）
-            );
+            // デバッグ: 計算されたバウンディングボックス最小点をログ出力
+            System.Diagnostics.Debug.WriteLine($"バウンディングボックス最小点: X={minX:F2}m, Y={minY:F2}m, Z={minZ:F2}m");
+
+            return new XYZ(minX, minY, minZ);
         }
     }
 }

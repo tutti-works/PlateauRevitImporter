@@ -72,16 +72,21 @@ namespace PlateauRevitImporter
 
         /// <summary>
         /// 新しいオフセット値を計算（初回インポート時）
-        /// モデルの中心座標がRevit原点(0,0,0)付近に来るように計算
+        /// バウンディングボックスの最小点を原点に移動するように計算
         /// </summary>
-        public static CoordinateOffset CalculateNewOffset(CityGMLParser.XYZ centroid)
+        public static CoordinateOffset CalculateNewOffset(CityGMLParser.XYZ bboxMin)
         {
-            // 中心座標を原点に移動するためのオフセット（符号反転）
-            return new CoordinateOffset(
-                -centroid.X,
-                -centroid.Y,
-                -centroid.Z
+            // 最小点を原点に移動するためのオフセット（符号反転）
+            var offset = new CoordinateOffset(
+                -bboxMin.X,
+                -bboxMin.Y,
+                -bboxMin.Z
             );
+
+            // デバッグ: 計算されたオフセットをログ出力
+            System.Diagnostics.Debug.WriteLine($"計算されたオフセット: X={offset.OffsetX:F2}m, Y={offset.OffsetY:F2}m, Z={offset.OffsetZ:F2}m");
+
+            return offset;
         }
 
         /// <summary>
