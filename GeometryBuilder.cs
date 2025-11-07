@@ -235,20 +235,6 @@ namespace PlateauRevitImporter
                 if (uniquePoints.Count < 3)
                     return null;
 
-                // デバッグ: 座標範囲を確認
-                double minX = uniquePoints.Min(p => p.X);
-                double maxX = uniquePoints.Max(p => p.X);
-                double minY = uniquePoints.Min(p => p.Y);
-                double maxY = uniquePoints.Max(p => p.Y);
-                double minZ = uniquePoints.Min(p => p.Z);
-                double maxZ = uniquePoints.Max(p => p.Z);
-                System.Diagnostics.Debug.WriteLine($"座標範囲: X[{minX:F2}, {maxX:F2}], Y[{minY:F2}, {maxY:F2}], Z[{minZ:F2}, {maxZ:F2}]");
-
-                // 三角形に分割
-                List<List<XYZ>> triangles = TriangulateFace(uniquePoints);
-                if (triangles.Count == 0)
-                    return null;
-
                 // TessellatedShapeBuilder with Mesh target (寛容) + Salvage fallback
                 TessellatedShapeBuilder builder = new TessellatedShapeBuilder();
                 builder.Target = TessellatedShapeBuilderTarget.Mesh;
@@ -256,32 +242,17 @@ namespace PlateauRevitImporter
 
                 builder.OpenConnectedFaceSet(false);
 
-                int addedCount = 0;
-                foreach (var triangle in triangles)
+                // Blender版と同様に、多角形をそのまま1つの面として追加（三角形分割なし）
+                try
                 {
-                    if (triangle.Count != 3)
-                        continue;
-
-                    // 三角形の面積チェック（極小三角形を除外）
-                    double area = CalculateTriangleArea(triangle[0], triangle[1], triangle[2]);
-                    if (area < 0.0001) // 約 0.01平方フィート
-                        continue;
-
-                    try
-                    {
-                        TessellatedFace face = new TessellatedFace(triangle, ElementId.InvalidElementId);
-                        builder.AddFace(face);
-                        addedCount++;
-                    }
-                    catch
-                    {
-                        // 個別の三角形追加失敗は無視
-                        continue;
-                    }
+                    TessellatedFace face = new TessellatedFace(uniquePoints, ElementId.InvalidElementId);
+                    builder.AddFace(face);
                 }
-
-                if (addedCount == 0)
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"多角形面の追加失敗: {ex.Message}");
                     return null;
+                }
 
                 try
                 {

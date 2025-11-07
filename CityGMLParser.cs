@@ -91,10 +91,15 @@ namespace PlateauRevitImporter
 
                         building.BuildingId = idAttr?.Value ?? $"Building_{processedBuildings}";
 
-                        // すべてのposList要素を抽出
+                        // 最高LODを検出（LOD2 > LOD1）
+                        int maxLod = GetMaxLodLevel(buildingElement);
+                        System.Diagnostics.Debug.WriteLine($"建物 {building.BuildingId}: 最高LOD={maxLod}");
+
+                        // 最高LODのposList要素のみを抽出（LOD0は常に除外）
                         var posLists = buildingElement.Descendants()
-                            .Where(e => e.Name.LocalName == "posList" ||
-                                       e.Name.LocalName == "coordinates");
+                            .Where(e => (e.Name.LocalName == "posList" || e.Name.LocalName == "coordinates") &&
+                                       !IsLOD0Element(e) &&
+                                       GetLodLevel(e) == maxLod);
 
                         foreach (var posList in posLists)
                         {
@@ -149,6 +154,76 @@ namespace PlateauRevitImporter
         }
 
         /// <summary>
+        /// 建物要素内の最高LODレベルを取得
+        /// </summary>
+        private static int GetMaxLodLevel(XElement buildingElement)
+        {
+            int maxLod = 0;
+
+            // すべての子孫要素を調査
+            foreach (var element in buildingElement.Descendants())
+            {
+                string localName = element.Name.LocalName;
+
+                // LOD2要素をチェック
+                if (localName.StartsWith("lod2", StringComparison.OrdinalIgnoreCase))
+                {
+                    maxLod = Math.Max(maxLod, 2);
+                }
+                // LOD1要素をチェック
+                else if (localName.StartsWith("lod1", StringComparison.OrdinalIgnoreCase))
+                {
+                    maxLod = Math.Max(maxLod, 1);
+                }
+            }
+
+            // デフォルトはLOD1（LOD0は除外）
+            return maxLod > 0 ? maxLod : 1;
+        }
+
+        /// <summary>
+        /// 要素のLODレベルを取得
+        /// </summary>
+        private static int GetLodLevel(XElement element)
+        {
+            // 親要素を遡ってLOD要素を探す
+            var current = element;
+            while (current != null)
+            {
+                string localName = current.Name.LocalName;
+
+                // LOD2をチェック
+                if (localName.StartsWith("lod2", StringComparison.OrdinalIgnoreCase))
+                {
+                    return 2;
+                }
+                // LOD1をチェック
+                else if (localName.StartsWith("lod1", StringComparison.OrdinalIgnoreCase))
+                {
+                    return 1;
+                }
+                // LOD0をチェック
+                else if (localName.StartsWith("lod0", StringComparison.OrdinalIgnoreCase))
+                {
+                    return 0;
+                }
+
+                current = current.Parent;
+            }
+
+            // デフォルトはLOD1
+            return 1;
+        }
+
+        /// <summary>
+        /// 要素がLOD0（2D足跡データ）に属するかチェック
+        /// </summary>
+        private static bool IsLOD0Element(XElement element)
+        {
+            return GetLodLevel(element) == 0;
+        }
+
+        /// <summary>
         /// posListの文字列から座標点リストを抽出
         /// 例: "35.123 139.456 10.5 35.124 139.457 11.0 ..." → [(35.123, 139.456, 10.5), (35.124, 139.457, 11.0), ...]
         /// </summary>
@@ -189,25 +264,75 @@ namespace PlateauRevitImporter
         }
 
         /// <summary>
+        /// ヒュベニの公式による距離計算（WGS84楕円体モデル）
+        /// Blender版PLATEAUインポーターから移植
+        /// </summary>
+        private class HubenyDistanceCalculator
+        {
+            // WGS84楕円体パラメータ
+            private const double A = 6378137.0;              // 長半径（メートル）
+            private const double B = 6356752.314245;         // 短半径（メートル）
+            private const double E2 = 0.006694380022900788;  // 第一離心率の2乗
+
+            /// <summary>
+            /// 2点間の距離をヒュベニの公式で計算
+            /// </summary>
+            /// <returns>(x: 東西方向距離, y: 南北方向距離) メートル単位</returns>
+            public static (double x, double y) Calculate(double lat1, double lon1, double lat2, double lon2)
+            {
+                // 度をラジアンに変換
+                double radLat1 = DegreesToRadians(lat1);
+                double radLon1 = DegreesToRadians(lon1);
+                double radLat2 = DegreesToRadians(lat2);
+                double radLon2 = DegreesToRadians(lon2);
+
+                // 平均緯度
+                double avgLat = (radLat1 + radLat2) / 2.0;
+
+                // 緯度・経度の差分
+                double dy = radLat1 - radLat2;
+                double dx = radLon1 - radLon2;
+
+                // 卯酉線曲率半径の分母
+                double sinAvgLat = Math.Sin(avgLat);
+                double W = Math.Sqrt(1.0 - E2 * sinAvgLat * sinAvgLat);
+
+                // 子午線曲率半径
+                double M = (A * (1.0 - E2)) / (W * W * W);
+
+                // 卯酉線曲率半径
+                double N = A / W;
+
+                // メートル単位の距離
+                double x = dx * N * Math.Cos(avgLat);
+                double y = dy * M;
+
+                return (x, y);
+            }
+
+            private static double DegreesToRadians(double degrees)
+            {
+                return degrees * Math.PI / 180.0;
+            }
+        }
+
+        /// <summary>
         /// 緯度・経度をメートル単位の平面座標に変換
-        /// EPSG:6697（JGD2011地理座標）をローカル平面座標系に簡易変換
+        /// EPSG:6697（JGD2011地理座標）をローカル平面座標系に変換
+        /// ヒュベニの公式を使用して高精度に計算
         /// </summary>
         private static XYZ ConvertLatLonToMeters(double latitude, double longitude, double height)
         {
-            // 東京周辺（緯度35度付近）の近似変換係数
-            const double METERS_PER_DEGREE_LAT = 111000.0;  // 緯度1度 ≈ 111km
-            const double METERS_PER_DEGREE_LON = 91000.0;   // 経度1度 ≈ 91km（緯度35度）
-
             // 参照点を設定（データの範囲内の適当な点）
             // この値は最初のバウンディングボックスの中心付近
             const double REFERENCE_LAT = 35.629;   // 参照緯度
             const double REFERENCE_LON = 139.781;  // 参照経度
 
-            // 参照点からの差分をメートルに変換
-            // 注意: 一般的なマッピングでは X=経度(東西), Y=緯度(南北)
-            double x = (longitude - REFERENCE_LON) * METERS_PER_DEGREE_LON;  // 東西方向
-            double y = (latitude - REFERENCE_LAT) * METERS_PER_DEGREE_LAT;   // 南北方向
+            // ヒュベニの公式で参照点からの距離を計算
+            var (x, y) = HubenyDistanceCalculator.Calculate(latitude, longitude, REFERENCE_LAT, REFERENCE_LON);
 
+            // 注意: Calculate()の戻り値は(経度差, 緯度差)なので、そのままX/Yに対応
+            // X=経度(東西), Y=緯度(南北)
             return new XYZ(x, y, height);
         }
 
