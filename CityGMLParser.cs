@@ -45,8 +45,10 @@ namespace PlateauRevitImporter
         /// CityGMLファイルから建物データを解析する
         /// </summary>
         /// <param name="filePath">CityGMLファイルのパス</param>
+        /// <param name="progressCallback">進捗報告用のコールバック（オプション）</param>
+        /// <param name="targetLod">インポートするLODレベル（1=簡易、2=詳細）</param>
         /// <returns>建物ジオメトリのリスト</returns>
-        public static List<BuildingGeometry> ParseCityGML(string filePath)
+        public static List<BuildingGeometry> ParseCityGML(string filePath, Action<int>? progressCallback = null, int targetLod = 2)
         {
             List<BuildingGeometry> buildings = new List<BuildingGeometry>();
 
@@ -78,6 +80,8 @@ namespace PlateauRevitImporter
                 }
 
                 int processedBuildings = 0;
+                int totalBuildings = buildingElements.Count();
+
                 foreach (var buildingElement in buildingElements)
                 {
                     try
@@ -93,13 +97,27 @@ namespace PlateauRevitImporter
 
                         // 最高LODを検出（LOD2 > LOD1）
                         int maxLod = GetMaxLodLevel(buildingElement);
-                        System.Diagnostics.Debug.WriteLine($"建物 {building.BuildingId}: 最高LOD={maxLod}");
 
-                        // 最高LODのposList要素のみを抽出（LOD0は常に除外）
+                        // ユーザーが選択したLODに基づいて使用するLODを決定
+                        int useLod = targetLod;
+                        if (targetLod == 2 && maxLod < 2)
+                        {
+                            // LOD2を選択したがデータにLOD2がない場合、LOD1にフォールバック
+                            useLod = 1;
+                        }
+                        else if (targetLod == 1)
+                        {
+                            // LOD1を明示的に選択した場合、LOD2があってもLOD1を使用
+                            useLod = 1;
+                        }
+
+                        System.Diagnostics.Debug.WriteLine($"建物 {building.BuildingId}: 最高LOD={maxLod}, 使用LOD={useLod}");
+
+                        // 指定されたLODのposList要素のみを抽出（LOD0は常に除外）
                         var posLists = buildingElement.Descendants()
                             .Where(e => (e.Name.LocalName == "posList" || e.Name.LocalName == "coordinates") &&
                                        !IsLOD0Element(e) &&
-                                       GetLodLevel(e) == maxLod);
+                                       GetLodLevel(e) == useLod);
 
                         foreach (var posList in posLists)
                         {
@@ -122,7 +140,15 @@ namespace PlateauRevitImporter
                         if (building.Surfaces.Count > 0)
                         {
                             buildings.Add(building);
-                            processedBuildings++;
+                        }
+
+                        processedBuildings++;
+
+                        // 進捗報告（0-95%の範囲で報告）
+                        if (progressCallback != null && totalBuildings > 0)
+                        {
+                            int percent = (int)((processedBuildings / (double)totalBuildings) * 95);
+                            progressCallback(percent);
                         }
                     }
                     catch (Exception ex)
@@ -316,6 +342,11 @@ namespace PlateauRevitImporter
             }
         }
 
+        // 固定参照点（すべてのインポートで同じ座標系を使用）
+        // この値はプロジェクト全体で一貫している必要がある
+        private const double REFERENCE_LAT = 35.629;   // 参照緯度
+        private const double REFERENCE_LON = 139.781;  // 参照経度
+
         /// <summary>
         /// 緯度・経度をメートル単位の平面座標に変換
         /// EPSG:6697（JGD2011地理座標）をローカル平面座標系に変換
@@ -323,11 +354,6 @@ namespace PlateauRevitImporter
         /// </summary>
         private static XYZ ConvertLatLonToMeters(double latitude, double longitude, double height)
         {
-            // 参照点を設定（データの範囲内の適当な点）
-            // この値は最初のバウンディングボックスの中心付近
-            const double REFERENCE_LAT = 35.629;   // 参照緯度
-            const double REFERENCE_LON = 139.781;  // 参照経度
-
             // ヒュベニの公式で参照点からの距離を計算
             var (x, y) = HubenyDistanceCalculator.Calculate(latitude, longitude, REFERENCE_LAT, REFERENCE_LON);
 

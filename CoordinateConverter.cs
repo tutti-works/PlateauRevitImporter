@@ -72,20 +72,19 @@ namespace PlateauRevitImporter
 
         /// <summary>
         /// 新しいオフセット値を計算（初回インポート時）
-        /// バウンディングボックスの最小点を原点に移動するように計算
+        /// 固定参照点を使用してオフセットを計算（追加インポート時の一貫性を確保）
         /// </summary>
         public static CoordinateOffset CalculateNewOffset(CityGMLParser.XYZ bboxMin)
         {
-            // 最小点を原点に移動するためのオフセット（符号反転）
-            var offset = new CoordinateOffset(
-                -bboxMin.X,
-                -bboxMin.Y,
-                -bboxMin.Z
-            );
+            // 注意: bboxMinは既に参照点からの相対座標（メートル単位）
+            // オフセット = 0 で、すべてのインポートが同じ座標系を使用
+            // 初回も追加も同じ原点になる
+            var offset = new CoordinateOffset(0, 0, 0);
 
             // デバッグ: 計算されたオフセットをログ出力
-            System.Diagnostics.Debug.WriteLine($"=== 計算されたオフセット ===");
+            System.Diagnostics.Debug.WriteLine($"=== 計算されたオフセット（固定参照点方式） ===");
             System.Diagnostics.Debug.WriteLine($"X={offset.OffsetX:F2}m, Y={offset.OffsetY:F2}m, Z={offset.OffsetZ:F2}m");
+            System.Diagnostics.Debug.WriteLine($"参照点からの相対座標を直接使用（追加インポート対応）");
             System.Diagnostics.Debug.WriteLine($"");
 
             return offset;
