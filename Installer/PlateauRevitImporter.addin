@@ -2,7 +2,7 @@
 <RevitAddIns>
   <AddIn Type="Application">
     <Name>PLATEAU CityGML Importer</Name>
-    <Assembly>PlateauRevitImporter.dll</Assembly>
+    <Assembly>C:\Program Files (x86)\PlateauRevitImporter\PlateauRevitImporter.dll</Assembly>
     <AddInId>8B7F5E3D-9C2A-4F1E-B8D6-3A7C9E2F1B4D</AddInId>
     <FullClassName>PlateauRevitImporter.App</FullClassName>
     <VendorId>tutti-works</VendorId>
