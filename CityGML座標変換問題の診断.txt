@@ -1,0 +1,440 @@
+﻿診断レポート：RevitアドオンにおけるCityGML座標変換の根本原因分析と解決策
+
+
+参照ID: CGML-RVT-DIAG-001
+診断日: 2024年5月22日
+担当: BIM/GIS統合スペシャリスト
+________________
+ご依頼いただいた「PLATEAU CityGML 2.0データのRevit 2026へのインポート」に関する座標変換の問題について、提供されたログ、コードスニペット、および関連技術資料を詳細に分析しました。本レポートは、観測された「垂直な線状の形状」という症状の根本原因を特定し、数値的に安定した堅牢な解決策を提示するものです。
+
+
+I. 診断サマリー： 座標収束の根本原因
+
+
+
+
+A. 症状の特定と原因の結論
+
+
+観測されている症状（デバッグログ X[-0.00, 0.00], Y[-0.01, -0.01]）は、インポートされたジオメトリのX軸およびY軸方向の幾何学的な「広がり」に関する情報が、座標変換プロセス中に完全に失われていることを示しています。Z軸の座標（Z[7.48, 193.24]）のみが正常に保持されている事実は、問題の切り分けにおいて決定的な手がかりとなります。
+根本原因は、CalculateCentroid関数で使用されている「全点の算術平均」を計算するアルゴリズムの数値的不安定性 (Numerical Instability) にあります。
+この不安定性は、2段階のプロセスを経て座標情報を破壊します。
+1. 情報落ち (Loss of Significance): PLATEAUが使用する平面直角座標系（JGD）の座標値は、原点から数万〜数十万メートル離れた巨大な値です。これらの巨大な値をC#のdouble型（System.Double）で単純に合計（sumX += point.X）する際、sumXの値が非常に大きくなると、それに対して個々のpoint.Xの値が相対的に小さくなりすぎ、加算時にdouble型の有効桁数（仮数部）から溢れて実質的に無視されます 1。
+2. 破滅的な桁落ち (Catastrophic Cancellation): 「情報落ち」によって精度が劣化した「ほぼ同じ」巨大な値（originalPoint.X）と「ほぼ同じ」巨大なオフセット値（offset.OffsetX）同士で引き算（originalPoint.X + offset.OffsetX）を行うと、共通する上位桁がすべてキャンセルされ、結果は有効な情報を一切含まないゼロ近傍のノイズ（浮動小数点演算の誤差）に収束します。これが、X/Y座標がゼロに収束する直接的な数学的理由です。
+
+
+B. 核心的分析： なぜZ軸は正常で、X/Y軸だけが失敗するのか？
+
+
+本診断において最も重要な分析結果は、Z軸とX/Y軸で根本的に異なるアルゴリズムが使用されている点にあります。
+* X/Y軸の処理 (不安定): sumX += point.X および sumY += point.Y。これは代数的な加算です。
+* Z軸の処理 (安定): minZ = Math.Min(minZ, point.Z)。これは数値的な比較です。
+System.Double型は、IEEE 754規格に基づく64ビット浮動小数点数であり、約15〜17桁の10進有効数字（仮数部）を持ちます。
+不安定な加算 (X/Y軸):
+JGD座標（例：X = 135,000.123）を考えます。この建物群の広がりが100mだと仮定します（135,000.123 から 135,100.123 の範囲）。
+1. sumX が蓄積され、例えば 1.0e+16（doubleの精度限界に近い）になったとします。
+2. 次の点の座標 point.X = 1.35e+5（135,000）を加算しようとします。
+3. 10,000,000,000,000,000.0 + 135,000.0 という演算が発生します。
+4. double型の約16桁の精度では、135,000.0 という値は、1.0e+16 に対して小さすぎるため、仮数部の下位に丸め込まれ、演算結果は 1.0e+16 のまま変わらない可能性があります 1。
+5. これが「情報落ち」です。建物群の形状を定義する個々の座標値が、合計値に正しく反映されなくなります。
+6. この不正確な sumX から計算された平均値 centroid.X は、もはや元の座標群の正確な平均ではありません。
+安定した比較 (Z軸):
+1. minZ の初期値は double.MaxValue です。
+2. Math.Min(double.MaxValue, 193.24) が実行されます。結果は 193.24 です。
+3. 次に Math.Min(193.24, 58.87) が実行されます。結果は 58.87 です。
+4. この比較操作は、値がどれほど巨大（または微小）であっても、double型は2つの数値を（その精度の範囲内で）正確に表現し、どちらが小さいかを確実に判定できます。
+5. したがって、minZ は常に数値的に安定して正確な最小値を保持します。
+ApplyOffset 時のZ軸計算 (originalPoint.Z + offset.OffsetZ) は、例えば (193.24 + (-7.48)) となり、これは巨大な値同士の引き算ではないため、数値的に完全に安定しています。
+
+
+C. 結論：アルゴリズムの選択ミス
+
+
+問題は、座標変換の順序やロジック（オフセットで原点に移動する）にあるのではなく、オフセット値を計算するためのアルゴリズム（算術平均）が、地理空間データ（巨大な座標）の特性に対して数値的に堅牢でない（non-robust） ことです。ご提示の仮説「セントロイドで相殺すると、建物群の広がり（X/Y方向）が失われる？」は、この「破滅的な桁落ち」の現象を正確に捉えています。
+
+
+II. PLATEAU CityGML座標系の詳細分析 (Q1)
+
+
+
+
+A. gml:posListの座標順序と単位
+
+
+<gml:posList>は、CityGML 2.0において座標リストをコンパクトに格納するためのGML標準の要素です 2。PLATEAUの仕様では、これらの座標は緯度/経度（地理座標系）ではなく、日本の測地系（JGD2011など）に基づいたメートル単位の平面直角座標系（Projected Coordinate System） で格納されています。
+これは、Revitでのジオメトリ生成において、投影変換（例：緯度/経度からメートルへの変換）が不要であり、単純な平行移動と単位変換（メートルからフィート）のみで処理できることを意味します。
+
+
+B. 潜在的リスク： GMLの「軸順序（Axis Order）」問題
+
+
+現在の「ゼロ収束」問題とは別に、将来的に必ず直面する可能性のある重大なリスクが存在します。それはGMLの軸順序の問題です。
+1. 前提の危険性: posListの座標順序が、数学で一般的な (X, Y, Z) (Easting, Northing, Height) であると仮定してはいけません。
+2. GML 3.xの仕様: CityGML 2.0が準拠するGML 3.x規格では、座標参照系（CRS）の公式な定義が軸の順序を決定します 3。
+3. GISの慣習: 多くの地理空間CRS（特にEPSGによって定義されるもの）は、伝統的な数学(X,Y)とは異なり、(Northing (北方向 = Y), Easting (東方向 = X)) の順序を「公式」として定義しています。
+4. アクションアイテム: ご使用のCityGMLファイルのヘッダー部（例：<gml:boundedBy>や<gml:Envelope>タグ）にあるsrsName属性（例：urn:ogc:def:crs:EPSG::6677など、JGD2011の系番号）を特定してください。次に、そのEPSGコードの公式定義を（例：EPSG.ioなどのデータベースで）確認し、軸順序が (X, Y) か (Y, X) かを検証する必要があります。
+5. 影響: もし公式の順序が (Y, X, Z) であった場合、現在のパーサーロジック points.Add(new XYZ(x, y, z)) は points.Add(new XYZ(y, x, z)) （コード上のxとyを入れ替える）に修正する必要があります。これを怠ると、本件のゼロ収束問題を解決した後、「インポートされたモデルが90度回転している」または「鏡像反転している」といった問題に直面することになります。
+
+
+C. JGD座標値の典型的範囲とデルタ
+
+
+日本の平面直角座標系（JGD）は、国土を19の系（ゾーン）に分割し、各系の原点から数十km〜数百km離れた位置を扱います。
+* 典型的範囲 (Q1.2): X/Y座標値が数万〜数十万メートル（例：X = -150,000, Y = 30,000）になることは典型的であり、正常なデータです。
+* 期待されるデルタ (Q1.3): 一方で、インポート対象の「建物群」（例：一つの街区）の広がりは、通常、高々数百メートル四方です。
+* 問題の核心: この「巨大な基底値（例：150,000）」と「微小なデルタ（例：0.1〜100）」の極端な組み合わせこそが、double型の単純な加算（sumX +=）が「情報落ち」を起こす最悪の条件です 1。
+
+
+III. 現行オフセット計算の妥当性検証 (Q2)
+
+
+
+
+A. 算術平均アプローチの検証
+
+
+現在の「全点の算術平均」アプローチ（Q2.1）は、前述のI-Bで詳述した通り、数値安定性の観点から根本的に不適切です。このアプローチは、JGDのような巨大座標系を扱う前提で設計されていません。
+
+
+B. 代替案：バウンディングボックス（BBox）基準
+
+
+代替案として提示された「最小値（BoundingBoxの原点）を使うべきか？」（Q2.2）は、全面的に正しいアプローチです。
+オフセットの基準点として、全ジオメトリを包含するバウンディングボックス（BBox）の最小点（Min）または中心（Center） を使用することを強く推奨します。これは、3D都市データベース 4 やGISデータ処理 における、巨大座標を扱う際の標準的な手法です。
+
+
+C. BBoxアプローチの数値的安定性
+
+
+BBoxアプローチが数値的に安定している理由は、Z軸の処理（minZ）が成功している理由と同一です。
+1. BBoxの計算（minX, maxX, minY, maxY）に必要な操作は、Math.Min と Math.Max のみです。
+2. これらの比較操作は、座標値がどれほど巨大であっても（例：Math.Min(150000.1, 150000.2)）、double型で数値的に常に安定しています。
+3. これにより、minX や maxX は、浮動小数点演算の誤差を蓄積することなく、データセットの正確な境界値を保持します。
+4. この安定したBBoxからオフセットベクトル offsetVect を定義します（例：BBoxの最小点 (minX, minY, minZ)）。
+5. ApplyOffset での計算は (originalPoint.X - offsetVect.X) となります。
+6. 例： (150000.1 - 150000.0)。これは依然として巨大な数値同士の引き算ですが、offsetVect.X が「情報落ち」によって「汚染」されていないため、double型はその有効桁数の範囲内で正確な差 0.1 を計算できます。
+7. この結果（0.1）が、Revitの原点(0,0,0)周りに配置されるべきローカル座標（＝建物群の広がり）となり、形状が正しく保持されます。
+
+
+D. 高度な考察： Kahanの補償和アルゴリズム
+
+
+現在の「算術平均」アルゴリズムが失敗する根本原因は sumX += point.X の精度低下にあります 1。この sumX +=... の計算自体を高精度化するアルゴリズムも存在します。それが「Kahanの補償和アルゴリズム（Compensated Summation）」です 5。
+このアルゴリズムは、sum（合計）の他に c（補償変数）という小さな変数を持ち運び、加算のたびに失われる「情報落ち」の部分を c に蓄積し、次の加算時に補正します。これにより、sumX は double 型でありながら、はるかに高い実効精度で合計を計算できます。
+しかし、このアプローチはBBoxアプローチと比較して以下の欠点があります。
+* 実装が複雑である。
+* BBoxアプローチは、Math.Min/Max のみを使用するため、Kahanの実装を必要とせず、よりシンプルかつ高速に、同等以上に安定した結果をもたらします。
+戦略的判断: Kahanの存在は、浮動小数点演算の奥深さを示すものとして重要ですが、本件の実装としてはBBoxアプローチ（Q2.2の代替案）を強く推奨します。
+
+
+E. Table 1: オフセット戦略の数値的安定性比較
+
+
+
+
+戦略
+	計算アルゴリズム
+	核心的演算
+	数値的安定性（JGD座標において）
+	推奨度
+	現行（算術平均）
+	sumX = 0; foreach(p) sumX += p.X;... offset = - (sumX/N)
+	double型による巨大な値の逐次加算
+	破綻 (Unstable) 1
+	非推奨
+	Kahan補償和
+	sumX=0, c=0; foreach(p) { y=p.X-c; t=sumX+y; c=(t-sumX)-y; sumX=t; }
+	補正付き加算 5
+	安定 (Stable)
+	過剰（Overkill）
+	BBox基準
+	minX = double.Max; foreach(p) minX = Math.Min(minX, p.X);... offset = -minX
+	double型による巨大な値の比較
+	非常に安定 (Robust)
+	強く推奨
+	
+
+IV. 座標変換の順序と地理参照の維持 (Q3 & 修正案)
+
+
+
+
+A. 座標変換の順序
+
+
+現在の順序（Q3.1）:
+CityGMLから座標読み取り（メートル単位） → 全建物のセントロイド計算 → オフセット = -セントロイド → 各点に対して: (point + offset) * 3.28084
+この順序は、数学的には正しいです。問題はステップ2「セントロイド計算」の実装（アルゴリズム）にのみ存在します。
+
+
+B. 堅牢な変換パイプライン（推奨）
+
+
+以下に、BBox基準を用いた堅牢な2パス・パイプラインを提案します。
+1. [第1パス - 走査]: CityGMLデータをパースし、全座標点を一度だけ走査します。このパスで、minX, maxX, minY, maxY, minZ, maxZ を Math.Min/Max を使って計算します。ジオメトリデータ（点群）はメモリに保持するか、ファイルポインタをリセットして第2パスに備えます。
+2. [第2パス - 変換]:
+a. オフセットベクトルの定義: Revitのローカル原点(0,0,0)にマッピングしたい「グローバル座標系の基準点」を決定します。
+* offsetVect = new XYZ(minX, minY, minZ) （BBoxの最小コーナー：最もシンプル）
+* offsetVect = new XYZ((minX+maxX)/2, (minY+maxY)/2, minZ) （BBoxのXY中心、Z最小：モデルがRevit原点を中心に配置され、推奨）
+b. 第2パスの実行: 再度データを走査し、各 originalPoint (メートル単位) に対して、数値的に安定した変換を実行します。
+```csharp
+// (originalPoint.X - offsetVect.X) の減算が先
+double local_X_m = originalPoint.X - offsetVect.X;
+double local_Y_m = originalPoint.Y - offsetVect.Y;
+double local_Z_m = originalPoint.Z - offsetVect.Z;
+// 単位変換
+const double metersToFeet = 3.28084;
+double revit_X_ft = local_X_m * metersToFeet;
+double revit_Y_ft = local_Y_m * metersToFeet;
+double revit_Z_ft = local_Z_m * metersToFeet;
+
+revitPoints.Add(new Autodesk.Revit.DB.XYZ(revit_X_ft, revit_Y_ft, revit_Z_ft));
+```
+
+
+
+C. 最も重要なステップ：地理参照の維持
+
+
+上記のステップBだけでは、モデルはRevitの原点(0,0,0)付近に正しく表示されますが、そのモデルが「日本のどこにあるか」という地理参照（Georeference）情報が失われます。
+   * Revitの制約: Revitは、内部原点から半径約16km（10マイル）を超える座標を持つジオメトリを正しく扱えません。これが、そもそもオフセットが必要な理由です。
+   * BIMベストプラクティス: この「16km制限」と「地理参照」を両立させるために、Revitは測量点（Survey Point） とプロジェクト基点（Project Base Point） という概念を持っています 6。
+   * 解決策:
+   1. アドオンは、モデルジオメトリをRevitの内部原点 (Internal Origin) (0,0,0) 付近に作成します（ステップBの通り）。
+   2. 次に、アドオンはRevit APIを呼び出し、測量点 (Survey Point) の位置を、ステップB-2aで計算した offsetVect（メートル単位をフィートに変換したもの）に設定します。
+   3. 具体的には、Revitの BasePoint.GetSurveyPoint(doc) で測量点を取得し、その位置を offsetVect の値に設定します（SpecifyCoordinatesAtPoint APIを使用するのが最も堅牢です）。
+   * 結果: これにより、Revitプロジェクトは「モデルは原点(0,0,0)にあるが、その(0,0,0)は、共有座標（測量点）系においては (offsetVect.X, offsetVect.Y, offsetVect.Z) である」と認識します。これで、他の地理参照済みデータ（例：別のCityGMLファイルや測量士のDWG）と正確に位置合わせ（アライメント）が可能になります。
+
+
+V. 類似実装の調査と設計パターン (Q4)
+
+
+
+
+A. 既存のBIM/GISインポータの分析
+
+
+巨大な地理空間座標を、Revitのようなローカル座標系を持つアプリケーションにインポートする際のアプローチは、確立された設計パターンに従います。
+   * cityjsonToRevit (C#): このRevitプラグインは、CRS（座標参照系）に基づき「再投影（reprojects）と平行移動（translates）」を行うと明記されています 7。さらに「Revitのサイトロケーション（測量点）を更新するか選択できる」機能があり、これは上記IV-Cで推奨した「地理参照の維持」のベストプラクティスと完全に一致します。
+   * RhinoCityJSON (C#): このRhino/Grasshopperプラグインは、「Model Origin」に入力座標を与えると、その座標がRhinoの原点(0,0,0)に平行移動（translated） される、とあります 8。
+   * PLATEAU SDK for Unity (C#): UnityもRevit同様、原点から遠く離れた巨大座標では浮動小数点の精度問題（"jitter"）が発生します。そのため、このSDKも必ずローカル原点へのオフセット処理を行っています。
+   * その他のツール: 3dcitydb や CityGMLTools も、CRS変換とローカル原点へのオフセットを中核機能としています。
+これらの既存実装はすべて、「オフセット（平行移動）によるローカル原点への配置」 という同一の基本パターンを採用しています。これは、浮動小数点精度の限界 とアプリケーションの原点依存性 に対する、業界標準の解決策です。
+
+
+B. C#向け座標参照系（CRS）ライブラリ
+
+
+現在のタスク（JGD平面座標→Revitローカル座標）では、座標系間の投影変換（Projection） は不要です。必要なのは平行移動（Translation） と単位変換（Unit Conversion） のみであり、追加のライブラリは不要です。
+もし将来的に、緯度/経度（例：WGS84, EPSG:4326）からJGD（例：EPSG:6677）へ、あるいはその逆の「投影変換」が必要になった場合、以下のC#ライブラリが利用可能です。
+   * Table 3: C#向け座標処理ライブラリの比較
+
+
+ライブラリ
+	概要
+	主な用途
+	関連資料
+	ProjNet
+	業界標準「PROJ」ライブラリの.NETポート。
+	任意のEPSGコード間の厳密な投影変換。
+	9
+	DotSpatial
+	フル機能の.NET GISライブラリ。
+	GISアプリケーション内でのCRS操作。
+	
+
+	CoordinateSharp
+	シンプルな.NETライブラリ。
+	Lat/Lon ⇔ UTM, MGRS, Cartesian の簡易変換。
+	7
+	GDAL/OGR (C# Bindings)
+	最も強力なGISデータI/O・変換ライブラリ。
+	複雑なGISデータ形式の読み書きと変換。
+	10
+	Aspose.GIS
+	商用GISライブラリ。
+	投影変換のサポート。
+	11
+	推奨: 当面はライブラリ不要（単純な減算と乗算のみ）。投影変換が必要になった場合は、ProjNet が強力かつオープンソース（MITライセンス）の標準的な選択肢です。
+
+
+VI. デバッグ戦略とコード修正案 (Q5 & 最終提案)
+
+
+
+
+A. 推奨されるデバッグ戦略
+
+
+現行コードの問題を完全に可視化し、新コードの正しさを検証するために、以下の値をログ出力してください。
+   * Table 2: 推奨デバッグウォッチリスト
+変数（または式）
+	ログ出力のタイミング
+	期待される値（BBox安定版）
+	観測される値（現行の不安定版）
+	originalPoint.X (最初の数点)
+	1. 読み取り直後 (M)
+	135000.123 (巨大な値)
+	135000.123
+	minX, maxX
+	1. 第1パス走査中 (M)
+	135000.123... 135050.456
+	(N/A)
+	offsetVect.X
+	2. オフセット計算後 (M)
+	135025.289 (BBox Centerの場合)
+	-135025.7... (不正確な平均)
+	(originalPoint.X - offsetVect.X)
+	3. オフセット適用 (M)
+	-25.166... 25.167 (小さな値)
+	(N/A)
+	(originalPoint.X + offset.OffsetX)
+	3. オフセット適用 (M)
+	(N/A)
+	0.000...01 (ゼロ近傍のノイズ)
+	revit_X_ft
+	4. 単位変換後 (Feet)
+	-82.56... 82.57 (Revitの妥当な値)
+	-0.00, 0.00 (ゼロ収束)
+	
+
+B. コード修正案： 堅牢なBBox基準の変換
+
+
+CityGMLParser.cs や CoordinateConverter.cs のロジックを、以下の堅牢なBBox基準の計算ロジックに置き換えることを推奨します。
+ステップ 1: BBox計算（第1パス）
+CalculateCentroid は、CalculateBoundingBox （または同様の機能を持つクラス）に置き換えるべきです。
+
+
+C#
+
+
+
+
+// CityGMLParser.cs または 専用のプロセッサクラス内
+
+// CityGMLParser.XYZ は CityGML のメートル座標を保持するカスタムクラスと仮定
+// Autodesk.Revit.DB.XYZ と区別する
+
+/// <summary>
+/// CityGMLの全座標を走査し、数値的に安定した方法で
+/// バウンディングボックス（境界領域）を計算します。
+/// </summary>
+public class BoundingBoxCalculator
+{
+   public double MinX { get; private set; } = double.MaxValue;
+   public double MinY { get; private set; } = double.MaxValue;
+   public double MinZ { get; private set; } = double.MaxValue;
+   public double MaxX { get; private set; } = double.MinValue;
+   public double MaxY { get; private set; } = double.MinValue;
+   public double MaxZ { get; private set; } = double.MinValue;
+   public long TotalPoints { get; private set; } = 0;
+
+   /// <summary>
+   /// パース中に CityGMLParser.XYZ (メートル単位) を追加します。
+   /// この操作は Math.Min/Max のみを使用するため、数値的に安定しています。
+   /// </summary>
+   public void AddPoint(CityGMLParser.XYZ point)
+   {
+       MinX = Math.Min(MinX, point.X);
+       MinY = Math.Min(MinY, point.Y);
+       MinZ = Math.Min(MinZ, point.Z);
+       MaxX = Math.Max(MaxX, point.X);
+       MaxY = Math.Max(MaxY, point.Y);
+       MaxZ = Math.Max(MaxZ, point.Z);
+       TotalPoints++;
+   }
+
+   /// <summary>
+   /// Revitの原点(0,0,0)にマッピングするための
+   /// グローバル座標系の「基準点」ベクトルを取得します（メートル単位）。
+   /// </summary>
+   public CityGMLParser.XYZ GetGlobalOffsetVector(OffsetStrategy strategy = OffsetStrategy.BBoxCenterAtMinZ)
+   {
+       if (TotalPoints == 0) return new CityGMLParser.XYZ(0, 0, 0);
+
+       switch (strategy)
+       {
+           case OffsetStrategy.BBoxMin:
+               // 基準点 = BBoxの最小コーナー
+               return new CityGMLParser.XYZ(MinX, MinY, MinZ);
+           
+           case OffsetStrategy.BBoxCenterAtMinZ:
+           default:
+               // 基準点 = BBoxのXY中心、Z最小 (推奨)
+               // (MinX + MaxX) / 2.0 は、巨大な値同士の引き算の前に
+               // 足し算を行うため、桁落ちのリスクがあります。
+               // (MaxX - MinX) は安定しているため、以下の計算がより堅牢です。
+               double centerX = MinX + (MaxX - MinX) / 2.0; 
+               double centerY = MinY + (MaxY - MinY) / 2.0;
+               return new CityGMLParser.XYZ(centerX, centerY, MinZ); 
+       }
+   }
+}
+
+public enum OffsetStrategy
+{
+   BBoxMin,          // BBoxの最小(X,Y,Z)をRevitの(0,0,0)にマッピング
+   BBoxCenterAtMinZ  // BBoxのXY中心、Z最小をRevitの(0,0,0)にマッピング
+}
+
+ステップ 2: オフセット適用（第2パス）
+CoordinateConverter.cs の ApplyOffset を、新しいオフセットベクトル（CoordinateOffset ではなく XYZ）を受け取るように修正します。
+
+
+C#
+
+
+
+
+// CoordinateConverter.cs
+// 古い CalculateNewOffset は削除
+
+/// <summary>
+/// CityGMLのメートル座標（巨大な値）を、オフセットベクトル（基準点）を用いて
+/// Revitのフィート座標（原点近傍の小さな値）に、数値的に安定した方法で変換します。
+/// </summary>
+/// <param name="originalPoint_meters">CityGMLから読み取った生の座標 (メートル)</param>
+/// <param name="globalOffsetVector_meters">BBoxCalculatorから取得した基準点 (メートル)</param>
+/// <returns>Revit API用の Autodesk.Revit.DB.XYZ (フィート)</returns>
+public static Autodesk.Revit.DB.XYZ ApplyOffsetAndConversion(
+   CityGMLParser.XYZ originalPoint_meters, 
+   CityGMLParser.XYZ globalOffsetVector_meters)
+{
+   const double metersToFeet = 3.28084;
+
+   //  crucial: 巨大座標同士の減算を先に行い、ローカル座標（小さな値）を計算します。
+   // この減算は、BBox計算が安定しているため、有効桁数を保持したまま
+   // 正確な差（例: 50.123）を計算できます。
+   double local_X_meters = originalPoint_meters.X - globalOffsetVector_meters.X;
+   double local_Y_meters = originalPoint_meters.Y - globalOffsetVector_meters.Y;
+   double local_Z_meters = originalPoint_meters.Z - globalOffsetVector_meters.Z;
+
+   // ローカル座標（小さな値）になってから、安全に単位変換（乗算）を行います。
+   double revit_X_feet = local_X_meters * metersToFeet;
+   double revit_Y_feet = local_Y_meters * metersToFeet;
+   double revit_Z_feet = local_Z_meters * metersToFeet;
+
+   return new Autodesk.Revit.DB.XYZ(revit_X_feet, revit_Y_feet, revit_Z_feet);
+}
+
+
+
+C. 検証方法
+
+
+   1. Revitでの目視: 修正コードでインポートを実行します。Revitの原点(0,0,0)付近に、Z方向だけでなくX/Y方向にも厚みと広がりを持った建物群が表示されれば、ゼロ収束問題は解決です。
+   2. 軸順序の確認: もしモデルが期待と異なる向き（例：90度回転）をしていた場合は、II-Bで指摘した「軸順序」の問題である可能性が高いです。パーサーの(X, Y)の割り当てを(Y, X)に入れ替えてみてください。
+   3. 地理参照の確認（推奨）: アドオンにIV-Cの「測量点の設定」ロジックを実装します。インポート後、Revitの「管理」タブ→「プロジェクトの場所」→「座標」→「測量点」を選択し、そのプロパティが globalOffsetVector_meters の値（フィートに換算したもの）と一致する巨大な座標値（例：E/W: 135025.7m, N/S: 30010.2m）を示していることを確認します。これがBIM/GIS統合の完全な検証となります。
+引用文献
+   1. numerical methods - numerically stable running average of floating ..., 11月 7, 2025にアクセス、 https://stackoverflow.com/questions/59951711/numerically-stable-running-average-of-floating-point-values
+   2. Modeling Guide for 3D Objects Part 1: Basics ( Rules for Validating GML Geometrics in CityGML ) - SIG3D, 11月 7, 2025にアクセス、 https://files.sig3d.org/file/ag-qualitaet/201311_SIG3D_Modeling_Guide_for_3D_Objects_Part_1.pdf
+   3. GML axis order problem in QGIS - Geographic Information Systems ..., 11月 7, 2025にアクセス、 https://gis.stackexchange.com/questions/296239/gml-axis-order-problem-in-qgis
+   4. 4.3.2. Calculating/updating bounding boxes — 3dcitydb-docs ..., 11月 7, 2025にアクセス、 https://3dcitydb-docs.readthedocs.io/en/latest/impexp/db-operations/db-bbox.html
+   5. Kahan summation algorithm - Wikipedia, 11月 7, 2025にアクセス、 https://en.wikipedia.org/wiki/Kahan_summation_algorithm
+   6. Best practices to work with coordinates in Revit - Autodesk, 11月 7, 2025にアクセス、 https://www.autodesk.com/support/technical/article/caas/sfdcarticles/sfdcarticles/Use-of-coordinates-in-Revit.html
+   7. tudelft3d/cityjsonToRevit: A plugin for importing CityJSON ... - GitHub, 11月 7, 2025にアクセス、 https://github.com/tudelft3d/cityjsonToRevit
+   8. cityjson/RhinoCityJSON: Rhino/Grasshopper plugin ... - GitHub, 11月 7, 2025にアクセス、 https://github.com/cityjson/RhinoCityJSON
+   9. c# - Converting x,y,zone coordinates to Latitude and Longitude ..., 11月 7, 2025にアクセス、 https://stackoverflow.com/questions/33565510/converting-x-y-zone-coordinates-to-latitude-and-longitude
+   10. 1月 1, 1970にアクセス、 https://gis.stackexchange.com/questions/61541/searching-for-c-code-to-convert-from-utm-to-wgs84-and-back
+   11. Convert LAT LONG to UTM in C# - Aspose Blog, 11月 7, 2025にアクセス、 https://blog.aspose.com/gis/convert-lat-long-to-utm-in-csharp/

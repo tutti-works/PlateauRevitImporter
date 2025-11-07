@@ -163,21 +163,52 @@ namespace PlateauRevitImporter
             // 3つずつ（X, Y, Z）読み取る
             for (int i = 0; i < values.Length - 2; i += 3)
             {
-                if (double.TryParse(values[i], out double x) &&
-                    double.TryParse(values[i + 1], out double y) &&
+                if (double.TryParse(values[i], out double lat) &&
+                    double.TryParse(values[i + 1], out double lon) &&
                     double.TryParse(values[i + 2], out double z))
                 {
-                    points.Add(new XYZ(x, y, z));
+                    // デバッグ: 最初の3点の生座標（緯度・経度）をログ出力
+                    if (points.Count < 3)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"CityGML生座標（緯度・経度） #{points.Count + 1}: 緯度={lat:F8}, 経度={lon:F8}, 高さ={z:F2}m");
+                    }
 
-                    // デバッグ: 最初の3点の生座標をログ出力（1回のみ）
+                    // 緯度・経度をメートル単位の平面座標に変換
+                    XYZ convertedPoint = ConvertLatLonToMeters(lat, lon, z);
+                    points.Add(convertedPoint);
+
+                    // デバッグ: 変換後の座標をログ出力
                     if (points.Count <= 3)
                     {
-                        System.Diagnostics.Debug.WriteLine($"CityGML生座標 #{points.Count}: X={x:F2}m, Y={y:F2}m, Z={z:F2}m");
+                        System.Diagnostics.Debug.WriteLine($"  → 変換後（メートル） #{points.Count}: X={convertedPoint.X:F2}m, Y={convertedPoint.Y:F2}m, Z={convertedPoint.Z:F2}m");
                     }
                 }
             }
 
             return points;
+        }
+
+        /// <summary>
+        /// 緯度・経度をメートル単位の平面座標に変換
+        /// EPSG:6697（JGD2011地理座標）をローカル平面座標系に簡易変換
+        /// </summary>
+        private static XYZ ConvertLatLonToMeters(double latitude, double longitude, double height)
+        {
+            // 東京周辺（緯度35度付近）の近似変換係数
+            const double METERS_PER_DEGREE_LAT = 111000.0;  // 緯度1度 ≈ 111km
+            const double METERS_PER_DEGREE_LON = 91000.0;   // 経度1度 ≈ 91km（緯度35度）
+
+            // 参照点を設定（データの範囲内の適当な点）
+            // この値は最初のバウンディングボックスの中心付近
+            const double REFERENCE_LAT = 35.629;   // 参照緯度
+            const double REFERENCE_LON = 139.781;  // 参照経度
+
+            // 参照点からの差分をメートルに変換
+            // 注意: 一般的なマッピングでは X=経度(東西), Y=緯度(南北)
+            double x = (longitude - REFERENCE_LON) * METERS_PER_DEGREE_LON;  // 東西方向
+            double y = (latitude - REFERENCE_LAT) * METERS_PER_DEGREE_LAT;   // 南北方向
+
+            return new XYZ(x, y, height);
         }
 
         /// <summary>
@@ -213,7 +244,10 @@ namespace PlateauRevitImporter
                 throw new ArgumentException("有効な座標点が見つかりません");
 
             // デバッグ: 計算されたバウンディングボックス最小点をログ出力
-            System.Diagnostics.Debug.WriteLine($"バウンディングボックス最小点: X={minX:F2}m, Y={minY:F2}m, Z={minZ:F2}m");
+            System.Diagnostics.Debug.WriteLine($"");
+            System.Diagnostics.Debug.WriteLine($"=== バウンディングボックス最小点（メートル単位） ===");
+            System.Diagnostics.Debug.WriteLine($"X={minX:F2}m, Y={minY:F2}m, Z={minZ:F2}m");
+            System.Diagnostics.Debug.WriteLine($"総頂点数: {totalPoints}");
 
             return new XYZ(minX, minY, minZ);
         }

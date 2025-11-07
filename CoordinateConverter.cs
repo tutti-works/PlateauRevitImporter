@@ -84,7 +84,9 @@ namespace PlateauRevitImporter
             );
 
             // デバッグ: 計算されたオフセットをログ出力
-            System.Diagnostics.Debug.WriteLine($"計算されたオフセット: X={offset.OffsetX:F2}m, Y={offset.OffsetY:F2}m, Z={offset.OffsetZ:F2}m");
+            System.Diagnostics.Debug.WriteLine($"=== 計算されたオフセット ===");
+            System.Diagnostics.Debug.WriteLine($"X={offset.OffsetX:F2}m, Y={offset.OffsetY:F2}m, Z={offset.OffsetZ:F2}m");
+            System.Diagnostics.Debug.WriteLine($"");
 
             return offset;
         }
