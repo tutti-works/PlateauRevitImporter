@@ -1,0 +1,56 @@
+<Window x:Class="PlateauRevitImporter.ProgressWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="PLATEAU CityGML インポート中"
+        Height="220" Width="500"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        WindowStyle="SingleBorderWindow"
+        Topmost="True">
+    <Grid Margin="25">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="15"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="10"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="15"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- タイトル -->
+        <TextBlock Grid.Row="0"
+                   Text="CityGMLファイルを処理しています..."
+                   FontSize="16"
+                   FontWeight="SemiBold"
+                   TextWrapping="Wrap"/>
+
+        <!-- プログレスバー -->
+        <ProgressBar Grid.Row="2"
+                     Name="progressBar"
+                     Height="30"
+                     Minimum="0"
+                     Maximum="100"
+                     Value="0"
+                     Background="#FFE0E0E0"
+                     Foreground="#FF0078D4"/>
+
+        <!-- パーセンテージ表示 -->
+        <TextBlock Grid.Row="4"
+                   Name="percentageText"
+                   Text="0%"
+                   FontSize="14"
+                   FontWeight="Bold"
+                   HorizontalAlignment="Center"
+                   Foreground="#FF0078D4"/>
+
+        <!-- ステータステキスト -->
+        <TextBlock Grid.Row="6"
+                   Name="statusText"
+                   Text="解析を開始しています..."
+                   FontSize="12"
+                   Foreground="#FF666666"
+                   TextWrapping="Wrap"
+                   TextAlignment="Center"/>
+    </Grid>
+</Window>

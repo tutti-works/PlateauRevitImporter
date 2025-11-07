@@ -1,0 +1,609 @@
+﻿CityGML 2.0（PLATEAU）ジオメトリのRevit 2025/2026へのインポートに関する技術的調査レポート
+
+
+
+
+セクション 1: 序論 - 根本的競合の分析：GISメッシュデータ vs Revitジオメトリカーネル
+
+
+
+
+1.1. 目的と概要
+
+
+本レポートは、日本のPLATEAUプロジェクトから取得したCityGML 2.0の建物ジオメトリを、Autodesk Revit 2025/2026（.NET 8.0）環境にDirectShapeとしてインポートする際に遭遇する、Autodesk.Revit.Exceptions.InternalException、Autodesk.Revit.Exceptions.ArgumentException、およびDirectShape検証エラーの根本原因を特定し、解決するための包括的な技術ガイドを提供します。
+
+
+1.2. 根本的な不一致（Impedance Mismatch）
+
+
+現在発生している各種の例外は、APIの個別のバグというよりも、RevitのBIM（ビルディング・インフォメーション・モデリング）環境と、CityGMLのGIS（地理情報システム）データとの間に存在する、3つの根本的な設計思想の衝突（インピーダンス・ミスマッチ）の現れです。
+1. 座標スケール: GISは測地座標系（例：平面直角座標系）に基づき、原点から遠く離れた巨大な座標値（メートル単位）を扱います。一方、Revitは建物の原点近傍でのモデリングに最適化されており、厳格な座標範囲制限（内部原点から半径約16km）を持ちます 1。
+2. ジオメトリ公差: GISデータは、しばしば浮動小数点精度の限界に迫る、非常に微細なコンポーネントを含むことがあります。対照的に、Revitのジオメトリカーネルは、建築スケールでのパフォーマンスと安定性を優先するため、意図的に「粗い」公差（例：最小曲線長が約0.8mm 3）で動作します。
+3. トポロジ表現: CityGMLは、ポリゴンの集合（サーフェスメッシュ）としてジオメトリを表現し、必ずしも水密（watertight）であることや、自己交差がないことを保証しません。Revitは、B-Rep（境界表現）ソリッドを優先し、ジオメトリには厳格なトポロジ（水密性、非自己交差）を要求します 4。
+
+
+1.3. Revitの「ブラックボックス」の解明：InternalExceptionの正体
+
+
+InternalException 6 は、Revit APIにおいて最も深刻なエラーです。これは、APIの.NETラッパー層ではなく、その下にあるC++で記述されたジオメトリカーネル（Autodesk Shape Manager - ASM）自体が、処理不能なデータ入力によって致命的な状態に陥ったことを示します 7。
+APIドキュメントには、InternalErrorやInternalUtilityErrorといった問題タイプがリストされており、「通常は存在すべきではない」と記されています 7。これは、開発者がこの例外をcatchして修正するのではなく、この例外をトリガーするデータ条件を根本的に「回避」しなければならないことを意味します。本レポートの主要な目的の一つは、この例外をトリガーするデータ条件を特定し、その回避策を提供することです。
+
+
+1.4. Revitの設計限界（Design Limits）の絶対性
+
+
+Revitの内部原点（0,0,0）から半径10マイル（約16km、直径20マイル/32kmの範囲）を超える座標 1 でジオメトリを作成しようとするAPIコールは、サポートされていません。このような試みは、グラフィックスの不安定性（シェーキング）9、ファイル破損、ジオメトリの消失 10、そしてInternalExceptionの直接的な原因となります 11。
+報告された状況（InternalExceptionの多発）は、適用されたと報告されている「座標オフセット補正」の実装に、何らかの欠陥があることを強く示唆しています。例えば、ジオメトリ作成後にTransformで移動させようとしても、作成時点で既にカーネルが大規模座標を拒否し、失敗します。ジオメトリは、Revitの内部原点近傍の座標値を使って最初から作成されなければなりません 13。
+
+
+1.5. Revitの公差の壁：インポート失敗の第二の主犯
+
+
+Revitは、建築スケールでのパフォーマンスを最適化するため、意図的に微小なジオメトリを許容しません。
+* Application.ShortCurveTolerance: Revitが許容する最小の曲線長を定義します 14。これ未満のLineを作成しようとするとArgumentExceptionが発生します 16。この値は経験的に約1/32インチ（～0.8mm）です 3。
+* TessellatedShapeBuilderの頂点間最小距離: これはShortCurveToleranceとは別の、より曖昧な制約です。フォーラムでの議論では、InternalException（特に "Could not Create consistent vertex list" エラー 18）が、近すぎる頂点（2mm～20mmの間隔とさえ報告されている 19）によって引き起こされることが明確に示されています 20。
+報告されたデータ前処理（重複点除去の閾値 0.001フィート = 約0.3mm）は、Revitのジオメトリ公差（～0.8mm以上）よりも小さいです。これがInternalExceptionの直接的な原因であると強く推測されます。
+Revitのカーネルにとって、0.3mmから0.8mmの間隔にある2つの頂点は、別個の頂点としては扱えず、かといって同一の頂点でもない「縮退（degenerate）」状態を引き起こします。これにより、カーネルはトポロジの構築に失敗し、"Could not Create consistent vertex list" 20 を伴うInternalExceptionをスローします。
+結論: 成功のためには、重複点除去のしきい値を、Revitの公差よりも大きく設定（例：2mm）し、近すぎる頂点を積極的に「溶接（Weld）」する必要があります。
+
+
+セクション 2: 戦略的必須事項：大規模座標（PLATEAU JGD2011）の管理
+
+
+
+
+2.1. ベストプラクティス：なぜ「その場」でのジオメトリ作成が失敗するのか
+
+
+Revit APIのジオメトリ作成メソッド（Line.CreateBound、TessellatedShapeBuilder.AddFaceなど）はすべて、入力されるXYZ座標が内部原点の10マイル（約52,800フィート）以内にあることを暗黙的に要求します 1。
+日本の平面直角座標系（JGD2011、メートル単位）21 のようなGIS座標は、原点から数十～数百km離れた巨大な値（例：X = -8073.896, Y = 63828.792 21）を持ちます。これらの値をフィートに変換し、Revit APIに直接渡すことは、セクション1.4で述べた設計限界に違反し、InternalExceptionを確実に引き起こします 9。
+
+
+2.2. 実装：堅牢な「オフセット、変換、配置」ワークフロー
+
+
+大規模座標を扱うための唯一の堅牢なワークフローは、すべてのジオメトリをRevitの内部原点（0,0,0）近傍で作成し、その後、Revitプロジェクトの測地基準点（Survey Point）を動かして、モデルの地理的な位置情報を維持することです。
+1. ステップ 1: 参照点の確立（メートル単位）:
+インポート対象のCityGMLデータセット全体（または対象タイル）のバウンディングボックスの中心、あるいは最初の建物の重心を、Vector3DまたはXYZ（メートル単位のdouble値として）で計算します。これをlocalOrigin_Metersとします。
+2. ステップ 2: 単位変換とオフセットの適用（最重要）:
+CityGMLから頂点座標（gmlVertex_Meters）を読み込むたびに、RevitのXYZオブジェクトを作成する前に、以下の計算を行います。
+   * 先に、メートル単位でオフセットを適用します。
+x_offset_m = gmlVertex_Meters.X - localOrigin_Meters.X
+   * その後、Revitの内部単位（フィート）に変換します。
+x_ft = x_offset_m * (1.0 / 0.3048)
+   * このオフセット済み・フィート変換済みの値で、RevitのXYZオブジェクトを作成します。
+XYZ revitVertex_NearOrigin = new XYZ(x_ft, y_ft, z_ft)
+      3. ステップ 3: ジオメトリの作成:
+ステップ2で作成したrevitVertex_NearOriginのみを使用して、TessellatedShapeBuilder（または他のAPI）を呼び出します。
+      4. ステップ 4: ジオリファレンスの維持:
+すべてのDirectShapeを原点近傍に作成した後、Revitの測地基準点（Survey Point）をアンクリップし、localOrigin_Metersに対応する位置まで（Transformを使用して）移動させます 22。
+この順序（メートルでオフセット → フィートに変換）は、巨大な座標値（メートル）を先にフィートに変換し（値がさらに大きくなる）、その後にオフセット計算を行うと、double型の浮動小数点精度の問題 26 で誤差が拡大するリスクを最小限に抑えるために重要です。
+
+
+2.3. C#コード例：頂点の事前変換ロジック
+
+
+このロジックは、Transformクラス（ジオメトリ作成後の移動に使用）28 を使うのではなく、XYZオブジェクトが作成される前の単純なベクトル演算として実装します。
+
+
+C#
+
+
+
+
+/// <summary>
+/// CityGML（メートル単位、大規模座標）の頂点を、
+/// Revitの内部原点近傍（フィート単位）のXYZに変換します。
+/// </summary>
+/// <param name="gmlVertex_Meters">GMLから読み取った頂点座標（メートル）</param>
+/// <param name="offsetVector_Meters">インポート基点となるオフセット（メートル）</param>
+/// <returns>Revitの内部単位（フィート）で、原点近傍に配置されたXYZ</returns>
+private XYZ ConvertGmlVertexToRevitXyz(XYZ gmlVertex_Meters, XYZ offsetVector_Meters)
+{
+   // Revit APIの定数は使用できないため、変換係数を定義
+   const double MetersToFeet = 1.0 / 0.3048;
+
+   // 1. メートル単位でオフセットを計算
+   double offsetX = gmlVertex_Meters.X - offsetVector_Meters.X;
+   double offsetY = gmlVertex_Meters.Y - offsetVector_Meters.Y;
+   double offsetZ = gmlVertex_Meters.Z - offsetVector_Meters.Z;
+
+   // 2. フィート単位に変換
+   double revitX = offsetX * MetersToFeet;
+   double revitY = offsetY * MetersToFeet;
+   double revitZ = offsetZ * MetersToFeet;
+
+   // 3. RevitのXYZオブジェクトを作成
+   return new XYZ(revitX, revitY, revitZ);
+}
+
+
+
+セクション 3: TessellatedShapeBuilderのInternalExceptionのデバッグ
+
+
+
+
+3.1. 最重要課題：「Could not Create consistent vertex list」エラー
+
+
+前述（セクション1.5）の通り、InternalExceptionの根本原因は、TessellatedShapeBuilder.Build()メソッドが、Revitの内部公差（約2mm 19）よりも近接した頂点を含むメッシュを処理しようとして、トポロジの構築に失敗することです 20。
+報告されている0.3mm（0.001フィート）の重複点除去しきい値は小さすぎ、Revitカーネルが縮退とみなすジオメトリを通過させてしまっています。
+
+
+3.2. 解決策：「頂点の溶接（Vertex Welding）」アルゴリズム
+
+
+解決策は、TessellatedShapeBuilderにTessellatedFaceを追加する前に、すべての頂点をより大きな公差（例：2.5mm）で一意化（溶接）することです。
+この処理の最も効率的な方法は、カスタムのIEqualityComparer<XYZ> 29 を実装し、それをDictionary<XYZ, int> 19 またはHashSet<XYZ>のコンストラクタに渡すことです。
+
+
+3.3. C#実装：XyzEqualityComparer（The Building Coderのベストプラクティス
+29
+
+
+以下のクラスは、指定された公差（tolerance）内で2つのXYZポイントを「等しい」と見なすための比較ロジックを提供します。
+
+
+C#
+
+
+
+
+using Autodesk.Revit.DB;
+using System.Collections.Generic;
+using System;
+
+/// <summary>
+/// 指定された公差（tolerance）に基づいてXYZオブジェクトを比較するIEqualityComparer。
+/// Revitのジオメトリカーネルの公差問題を回避するための頂点溶接に使用する。
+///  に基づく実装。
+/// </summary>
+public class XyzEqualityComparer : IEqualityComparer<XYZ>
+{
+   private readonly double _tolerance;
+   private readonly double _toleranceSq;
+
+   /// <summary>
+   /// 公差を指定してコンストラクタを初期化します。
+   /// </summary>
+   /// <param name="toleranceInFeet">公差（フィート単位）。
+   /// Revitの最小公差（約0.8mm）より大きい値を推奨。例：2.5mm = 0.0082ft</param>
+   public XyzEqualityComparer(double toleranceInFeet = 0.0082) 
+   {
+       _tolerance = toleranceInFeet;
+       _toleranceSq = toleranceInFeet * toleranceInFeet;
+   }
+
+   public bool Equals(XYZ p1, XYZ p2)
+   {
+       if (p1 == null && p2 == null) return true;
+       if (p1 == null |
+
+| p2 == null) return false;
+       
+       // IsAlmostEqualToよりも高速なチェック
+       // 最初に単純なB-Boxチェック
+       if (Math.Abs(p1.X - p2.X) > _tolerance) return false;
+       if (Math.Abs(p1.Y - p2.Y) > _tolerance) return false;
+       if (Math.Abs(p1.Z - p2.Z) > _tolerance) return false;
+       
+       // 距離の2乗で比較（平方根の計算を避ける）
+       return p1.DistanceToSqr(p2) < _toleranceSq;
+   }
+
+   public int GetHashCode(XYZ p)
+   {
+       // 公差に基づく空間グリッドでハッシュコードを生成
+       int ix = (int)Math.Round(p.X / _tolerance);
+       int iy = (int)Math.Round(p.Y / _tolerance);
+       int iz = (int)Math.Round(p.Z / _tolerance);
+
+       // ビットシフトを使用して3つのハッシュコードを組み合わせる
+       unchecked
+       {
+           int hash = 17;
+           hash = hash * 23 + ix.GetHashCode();
+           hash = hash * 23 + iy.GetHashCode();
+           hash = hash * 23 + iz.GetHashCode();
+           return hash;
+       }
+   }
+}
+
+
+
+3.4. C#実装：頂点溶接とTessellatedFaceの構築
+
+
+このXyzEqualityComparerを使い、CityGMLの頂点リストを処理してTessellatedShapeBuilderを構築します。
+
+
+C#
+
+
+
+
+// (TransactionとDocument 'doc' が利用可能であると仮定)
+
+// 1. 比較オブジェクトとルックアップ辞書を初期化 [19, 30]
+// 公差を2.5mm（0.0082フィート）に設定。0.3mm（0.001ft）では小さすぎる。
+double weldTolerance = 0.0082; 
+var comparer = new XyzEqualityComparer(weldTolerance);
+var vertexLookup = new Dictionary<XYZ, int>(comparer);
+var uniqueVertices = new List<XYZ>();
+var faceIndexLists = new List<List<int>>();
+
+// (GMLパーサーが 'allGmlFaces' (頂点リストのリスト) を提供すると仮定)
+// (また、'gmlOffsetVector_Meters' がセクション2.1に従い決定されていると仮定)
+
+// 2. CityGMLの全頂点を処理し、溶接する
+foreach (var gmlFaceVertices_Meters in allGmlFaces)
+{
+   var faceIndices = new List<int>();
+   foreach (var gmlVertex_Meters in gmlFaceVertices_Meters)
+   {
+       // セクション2.3のメソッドで座標を変換
+       XYZ revitVertex = ConvertGmlVertexToRevitXyz(gmlVertex_Meters, gmlOffsetVector_Meters);
+       
+       if (!vertexLookup.TryGetValue(revitVertex, out int index))
+       {
+           // 辞書にない新しい頂点
+           index = uniqueVertices.Count;
+           uniqueVertices.Add(revitVertex);
+           vertexLookup.Add(revitVertex, index); // 辞書に追加
+       }
+       faceIndices.Add(index);
+   }
+   
+   // 極小の三角形を除外（ユーザーは既に実施済みだが、溶接後にも確認）
+   if (IsFaceAreaTooSmall(faceIndices, uniqueVertices)) continue;
+   
+   faceIndexLists.Add(faceIndices);
+}
+
+// 3. TessellatedShapeBuilderの構築 [31, 32]
+var builder = new TessellatedShapeBuilder();
+
+// ターゲットを 'Mesh' に設定。'Solid' よりもはるかに寛容。
+builder.Target = TessellatedShapeBuilderTarget.Mesh; [33]
+// フォールバックを 'Salvage' に設定。可能な限りジオメトリを構築しようとする。
+builder.Fallback = TessellatedShapeBuilderFallback.Salvage; [33, 34]
+// 法線の一貫性をビルダーにチェックさせる 
+builder.OpenConnectedFaceSet(true); 
+
+ElementId materialId = ElementId.InvalidElementId; // マテリアルは後で設定可能
+
+foreach (var indexList in faceIndexLists)
+{
+   var faceVertices = new List<XYZ>();
+   foreach (int index in indexList)
+   {
+       faceVertices.Add(uniqueVertices[index]);
+   }
+   
+   // TessellatedFaceは3頂点以上で構成されている必要がある
+   if (faceVertices.Count < 3) continue; 
+   
+   builder.AddFace(new TessellatedFace(faceVertices, materialId));
+}
+
+builder.CloseConnectedFaceSet();
+builder.Build();
+
+var result = builder.GetBuildResult();
+if (result.Outcome == TessellatedShapeBuilderOutcome.Completed)
+{
+   using (Transaction tx = new Transaction(doc, "Create DS from Mesh"))
+   {
+       tx.Start();
+       var ds = DirectShape.CreateElement(doc, new ElementId(BuiltInCategory.OST_GenericModel));
+       ds.SetShape(result.GetGeometricalObjects());
+       tx.Commit();
+   }
+}
+else
+{
+   // ビルド失敗。ログに結果を出力。
+   // string issues = result.GetIssuesAsText();
+   System.Diagnostics.Debug.WriteLine($"TessellatedShapeBuilder failed: {result.Outcome}");
+}
+
+
+
+3.5. ターゲットの戦略的選択：Solid vs Mesh
+
+
+TessellatedShapeBuilder 34 にはSolidとMeshの2つの主要なターゲットがあります。
+         * Solidターゲット 31: この設定では、Build()メソッドは、渡されたTessellatedFaceの集合から、トポロジ的に有効なB-Repソリッド（閉じた、水密で、自己交差のないボリューム）を構築しようとします 4。CityGML（特にLOD2）データが、この厳格な条件を常に満たす保証は全くありません。メッシュにわずかな隙間、重複、または法線の不一致 35 があるだけで、Build()はInternalExceptionをスローするか、TessellatedShapeBuilderOutcome.Abortedを返します。
+         * Meshターゲット 33: この設定は、水密でない「サーフェススープ」（面の集合）を許容します。これは、CityGMLのようなインポートデータに対してはるかに堅牢な選択肢です。DirectShapeは、ソリッドとメッシュの両方を問題なく格納できます 36。
+推奨: CityGMLのインポートには、常にTessellatedShapeBuilderTarget.Meshを使用してください。Solidターゲットは、このユースケースでは非現実的であり、InternalExceptionの主要な原因の一つです。
+
+
+3.6. Revit 2026.NET 8.0 特有の問題：ISetとSortedSet
+
+
+Revit 2026のリリースノートでは、「ISet入力を受け入れるAPIメソッドにSortedSetを渡すとInternalExceptionがトリガーされる問題」が修正されたと記載されています 10。
+これはTessellatedShapeBuilderとは直接関係ない可能性が高いですが、もしアドインの他の部分（例：FilteredElementCollector 38 のIDリスト作成や、ElementIntersectsSolidFilterの使用）でSortedSetをAPIに渡している場合、それがRevitセッション全体を不安定にし、後続のジオメトリ操作で予期せぬInternalExceptionを誘発する可能性があります。
+対策:
+         1. Revit 2026が最新のアップデート（2026.1以降）に更新されていることを確認してください。
+         2. コードベース全体で、Revit APIに渡されるコレクションがSortedSet 10 でないことを確認し、必要であればHashSetまたはListに置き換えてください 39。
+
+
+セクション 4: GeometryCreationUtilitiesアプローチの失敗分析（非推奨）
+
+
+
+
+4.1. 概要
+
+
+GeometryCreationUtilities.CreateExtrusionGeometry 41 は、クリーンなB-Repプロファイル（CurveLoop）を線形に押し出すために設計されたAPIです。CityGMLの三角メッシュ化されたポリゴンをこのAPIで処理しようとすることは、根本的なミスマッチであり、推奨されません。失敗の原因は、このAPIの厳格な前提条件を満たせなかったためです。
+
+
+4.2. ArgumentExceptionの根本原因：CurveLoopの厳格な要件
+
+
+CreateExtrusionGeometry 41 および CurveLoop.Create 43 は、入力されるCurveLoopに対して、以下のすべてを厳格に要求します 43。
+         1. 完全に閉鎖（Closed）: CurveLoopは、始点と終点が厳密に一致する必要があります 46。三角メッシュからエッジのLineを作成する際、浮動小数点精度の問題で、ループの始点と終点がわずかに（Revitの公差以下で）ずれると、CurveLoop.IsOpen()がtrue（開いている）と判定され、ArgumentExceptionが発生します 45。
+         2. 完全に共平面（Planar）: ループを構成するすべてのCurveが、厳密に同一平面上に存在する必要があります 43。CityGMLのポリゴン（特に座標変換後）が、Revitの厳格な平面性テスト（CurveLoop.HasPlane() 47）に合格する保証はありません。
+         3. 自己交差なし（Not Self-Intersecting）: ループが自身と交差してはなりません 43。
+         4. 縮退曲線なし（No Degenerate Curves）: ループ内のCurve（例：Line）の長さがApplication.ShortCurveTolerance 14（約0.8mm 3）未満であってはなりません 3。CityGMLデータには、この公差未満の微小なエッジが含まれている可能性が非常に高いです。
+
+
+4.3. ArgumentsInconsistentExceptionの根本原因
+
+
+この例外は、「個々の引数（profileLoopsとextrusionDir）はそれぞれ有効だが、その組み合わせが無効」な場合にスローされます 48。CreateExtrusionGeometryの文脈では、これはextrusionDir（押し出し方向ベクトル）がprofileLoopsの平面に対して平行（またはほぼ平行）であることを意味します 41。これは、CityGMLから計算した法線ベクトルが不正であるか、CurveLoop自体が縮退して有効な平面を定義できない場合に発生します。
+
+
+4.4. 結論
+
+
+このCreateExtrusionGeometryアプローチは完全に放棄すべきです。CityGMLの各ポリゴンをCurveLoopに変換し、薄く押し出す戦略は、Revit APIの厳格なB-Rep要件に阻まれ、計算コストが高く、失敗率が非常に高い（報告では27個のみ成功）です。
+
+
+セクション 5: DirectShape検証基準（"Validation Criteria"）の完全ガイド
+
+
+
+
+5.1. エラーの特定
+
+
+"At least one member of pGeomArr does not satisfy DirectShape validation criteria" 49 は、DirectShape.SetShape(IList<GeometryObject>) 50 が、渡されたGeometryObject（SolidまたはMesh）を、Revitの内部ジオメトリとして無効であると判断し、拒否したことを意味します。
+
+
+5.2. DirectShape.IsValidGeometry(GeometryObject)による事前検証
+
+
+SetShapeを呼び出す前に、このメソッド 50 を使用して、作成した各GeometryObjectを検証することが強く推奨されます。falseが返された場合、そのジオメトリはSetShapeによって拒否されます。
+
+
+5.3. 検証基準の詳細
+
+
+DirectShapeがジオメトリを受け入れるための基準は、APIドキュメントでは明示的にリストされていませんが、以下の複合的な要因に基づいています。
+         1. ジオメトリの品質（50）: ジオメトリは「意味のある（make sense）」表現でなければなりません。これには、過度の自己交差（Solidの場合）4、非多様体（non-manifold）トポロジ、開いたエッジ（Solidの場合）52 がないことが含まれます。
+         2. 座標範囲（1）: ジオメトリ全体が、DirectShapeが配置される場所（通常は内部原点）の10マイル（16km）範囲内に完全に収まっている必要があります 1。
+         3. 最小サイズと縮退（18）: ジオメトリが小さすぎる、または薄すぎる（縮退している）場合、検証に失敗します。
+         4. カテゴリの妥当性（36）: ジオメトリ自体ではなく、DirectShape.CreateElementに渡されたCategoryIdが、DirectShape.IsValidCategoryId() 37 でtrueを返す、トップレベルのモデルカテゴリ（Category.CategoryType == Model）である必要があります 37。
+
+
+5.4. CreateExtrusionGeometry（27個成功）の失敗原因の分析
+
+
+CreateExtrusionGeometryで27個のSolidが作成に成功したにもかかわらず、SetShapeで「validation criteria」エラーが発生した原因について、以下のように推測されます。
+         1. ユーザーは、厚さ0.01フィート（約3.048mm）のソリッドを作成しようとしました。
+         2. CreateExtrusionGeometryは、APIレベルではこれらの薄いソリッドの作成に成功しました。
+         3. しかし、SetShapeが呼び出された際、Revitの内部ジオメトリカーネルは、これらのソリッドを検証しました。
+         4. 3mmという厚さは、Revitカーネルが「ソリッド」として扱うための内部的な最小厚さのしきい値（セクション3.1で議論した2mm～20mmの範囲 19）に非常に近いか、それを下回っています。
+         5. その結果、Revitカーネルはこれらのソリッドを「縮退した（degenerate）ジオメトリ」53 または「無効なジオメトリ」50 とみなし、DirectShapeへの格納を拒否しました。
+
+
+5.5. 【表】DirectShape検証基準とデバッグ
+
+
+
+
+検証基準
+	関連API / ドキュメント
+	失敗の兆候（報告された状況）
+	解決策
+	座標範囲
+	1
+	InternalException。大規模座標のままジオメトリを作成しようとした。
+	セクション2の「オフセット、変換、配置」ワークフローを厳密に実行する。
+	ジオメトリ品質
+	IsValidGeometry() 50, 4
+	TessellatedShapeBuilder (Solid) でのInternalException。
+	Solidターゲットを諦め、TessellatedShapeBuilderTarget.Mesh 33 を使用する。
+	最小サイズ / 縮退
+	18
+	CreateExtrusionGeometryで作成した薄い(0.01ft)ソリッドがSetShapeで失敗。
+	押し出しアプローチを放棄する。TessellatedShapeBuilderを使用し、極小のTessellatedFace（報告では既に対応済み）を除外する。
+	カテゴリ妥当性
+	IsValidCategoryId() 36
+	DirectShape.CreateElement時のArgumentException（本件では発生していない）。
+	new ElementId(BuiltInCategory.OST_GenericModel)など、検証済みのカテゴリIDを使用する。
+	
+
+セクション 6: 代替アーキテクチャの評価
+
+
+
+
+6.1. DirectShape（本アプローチ、推奨）
+
+
+         * 長所: Revit APIで直接メッシュまたはソリッドを格納できる最速の方法です 54。IFCやSTEPなどの外部フォーマットのインポート用に設計されており、本ユースケースに最適です 36。
+         * 短所: 「本物の」Revit要素（WallやRoof）のようには動作しません。壁へのホスティング、完全な寸法記入、ルーム境界の定義などができません 55。マテリアルパラメータの割り当てにも制限があります 57。
+         * 結論: CityGMLのような大規模な「コンテキスト」モデル（数千の建物）を効率的に表示するための、現時点で最良のアプローチです。
+
+
+6.2. 代替案 1: FamilyInstance（動的生成）
+
+
+         * ワークフロー: 建物ごとにFamilyDocumentをメモリ内で作成し、その中にジオメトリ（FreeFormElement 59 など）を作成し、プロジェクトにLoadFamilyし、FamilyInstanceを配置します 60。
+         * 長所: より「Revitネイティブ」な要素となり、マテリアルパラメータなどを制御しやすくなります 59。
+         * 短所:
+         1. パフォーマンス: 数千のユニークな建物（PLATEAU）に対して、数千の固有のFamilyを作成・ロードするプロセスは、DirectShapeに比べて桁違いに遅く、Revitプロジェクトのファイルサイズが許容不可能なレベルまで肥大化します 63。
+         2. ジオメトリの壁: Family内にジオメトリを作成する際も、TessellatedShapeBuilderやFreeFormElement 59 を使用する必要があり、セクション3で議論したジオメトリ品質の問題（公差、水密性）が再び発生します。
+         * 結論: スケーラビリティの問題により、CityGMLのような大規模データセットのインポートには不向きです。
+
+
+6.3. 代替案 2: ImportInstance（中間ファイル経由）
+
+
+         * ワークフロー: CityGMLを、FME 65 や citygml-tools 67 などの外部ツールを使用して、SAT、DWG、OBJ、またはIFC形式に変換します。その後、Revit APIの Document.Link または Document.Import メソッドを使用して、その中間ファイルをインポートします 68。
+         * 長所: Revitに組み込まれているC++のインポートエンジン（特にSAT/Rhino/STEPインポータ）は、APIのTessellatedShapeBuilderよりもはるかに堅牢であり、多くのジオメトリエラーを自動的に修復（ヒーリング）する機能が強化されています 10。
+         * 短所: C#のRevitアドイン外での変換プロセスが必要になり、ワークフローが複雑化します。
+         * 結論: TessellatedShapeBuilderでのInternalExceptionがどうしても解決できない場合の、最も堅牢な「プランB」として有効です。
+
+
+6.4. 既存のオープンソースプロジェクトからの知見
+
+
+         * tudelft3d/cityjsonToRevit 71: GitHubで公開されているこのプロジェクトは、CityJSON（CityGMLのJSON版）をRevitにインポートします。特筆すべきは、CRS（座標参照系）の再投影を処理し、ジオメトリを「generic models」として生成する機能です。このプロジェクトのコードベースは、本タスクの座標処理とジオメトリ生成のための最良のリファレンスとなります。
+         * Project-PLATEAU/PLATEAU-SDK-for-Unity 67: これはUnity用ですが、CityGMLをパースするためのC#ロジック（GMLから頂点と面を抽出する部分 73）が含まれており、Revitアドインに流用可能です。
+
+
+セクション 7: 最終推奨ワークフローと実装コードの集大成
+
+
+
+
+7.1. 推奨アーキテクチャ
+
+
+TessellatedShapeBuilderアプローチは正しい選択ですが、(1) 座標処理、(2) 頂点溶接、(3) ターゲット選定、の3点に修正が必要です。以下に、これらを修正した堅牢なワークフローを示します。
+
+
+7.2. ステップ 1: GML/XMLのパース
+
+
+System.Xml.Linq または System.Xml.XmlReader を使用して、CityGMLファイル（.gml）をパースします。
+         * <gml:posList> や <gml:pos> タグから頂点座標（メートル単位のdouble）を読み込みます。
+         * <gml:Polygon> の <gml:LinearRing> から面の定義（頂点インデックスのリスト）を読み込みます。
+         * （この処理は、PLATEAU-SDK-for-Unity 67 のパーサーロジックを参考にできます。）
+
+
+7.3. ステップ 2 & 3: 座標オフセットと頂点溶接（単一ループ内での実行）
+
+
+セクション3.4のコード例（XyzEqualityComparerとDictionaryを使用）に従います。
+         * 最重要修正: 頂点溶接のしきい値（weldTolerance）を、報告されている0.3mm（0.001ft）から、より安全な**2.5mm（約0.0082ft）**に変更します。これは、報告されている2mmの最小値 19 をわずかに上回る、安全な値です。
+
+
+7.4. ステップ 4: ジオメトリ構築（TessellatedShapeBuilder）
+
+
+セクション3.4のコード例に従い、TessellatedShapeBuilderを以下の設定で構成します。
+         * builder.Target = TessellatedShapeBuilderTarget.Mesh; 33
+         * builder.Fallback = TessellatedShapeBuilderFallback.Salvage; 33
+         * builder.OpenConnectedFaceSet(true); 31
+
+
+7.5. ステップ 5: DirectShapeの作成と例外処理
+
+
+builder.Build()を呼び出した後の、最終的なDirectShape作成と検証のコードです。
+
+
+C#
+
+
+
+
+// (builder.Build() 呼び出し後)
+TessellatedShapeBuilderResult result = builder.GetBuildResult();
+
+if (result.Outcome!= TessellatedShapeBuilderOutcome.Completed)
+{
+   // ビルド失敗のログを記録
+   // GetIssues() で詳細を確認可能 [7, 76]
+   // 例： 'InternalMissingError', 'NonPlanarProfileLoop' 
+   LogError($"TessellatedShapeBuilder failed for GML ID {gmlBuildingId}: {result.Outcome}");
+   return; // この建物の処理を中断
+}
+
+IList<GeometryObject> builtGeometry = result.GetGeometricalObjects();
+
+if (builtGeometry == null |
+
+| builtGeometry.Count == 0)
+{
+   LogError($"Builder succeeded for GML ID {gmlBuildingId} but produced no geometry.");
+   return;
+}
+
+// SetShapeの前にジオメトリを検証 
+// （注：大規模なジオメトリではこの検証自体が重い場合があるため、
+//   SetShapeのtry-catchで代替することも可能）
+List<GeometryObject> validGeometries = new List<GeometryObject>();
+foreach (var geom in builtGeometry)
+{
+   if (geom!= null && DirectShape.IsValidGeometry(geom))
+   {
+       validGeometries.Add(geom);
+   }
+   else
+   {
+       LogError($"Validation failed for a geometry part. GML ID: {gmlBuildingId}");
+   }
+}
+
+if (validGeometries.Count == 0)
+{
+   LogError($"No valid geometry found after validation. GML ID: {gmlBuildingId}");
+   return;
+}
+
+// トランザクション内でDirectShapeを作成
+using (Transaction tx = new Transaction(doc, "Import CityGML Building"))
+{
+   tx.Start();
+   
+   DirectShape ds = DirectShape.CreateElement(doc, 
+       new ElementId(BuiltInCategory.OST_GenericModel));
+   
+   // ApplicationIdとApplicationDataIdで、このDSの出所を追跡可能にする 
+   ds.ApplicationId = "CityGML-PLATEAU-Importer"; 
+   ds.ApplicationDataId = gmlBuildingId; // GMLのIDを設定
+   
+   try
+   {
+       // ここで "validation criteria"  エラーが発生する可能性がある
+       ds.SetShape(validGeometries); 
+   }
+   catch (Autodesk.Revit.Exceptions.ArgumentException ex)
+   {
+       //  に記載されている 'validation criteria' 違反
+       LogError($"DirectShape.SetShape failed for GML ID {gmlBuildingId}: {ex.Message}");
+       tx.RollBack();
+       return;
+   }
+   catch (Autodesk.Revit.Exceptions.InternalException intEx)
+   {
+       // 万が一、SetShapeでInternalExceptionが発生した場合
+       LogError($"DirectShape.SetShape caused InternalException. GML ID: {gmlBuildingId}: {intEx.Message}");
+       tx.RollBack();
+       return;
+   }
+   
+   tx.Commit();
+}
+
+
+
+7.6. 結論
+
+
+報告されたInternalExceptionおよびArgumentExceptionは、Revitのジオメトリカーネルの厳格な制約（座標範囲と公差）と、GISデータの特性との間のミスマッチに起因しています。
+GeometryCreationUtilitiesアプローチは、CityGMLデータには不適切であるため放棄すべきです。
+成功への道筋は、TessellatedShapeBuilderアプローチに集中し、以下の3つの重要な修正を実装することです。
+         1. 座標系の厳格な管理: すべてのジオメトリをRevit APIで作成する前に、セクション2.3で示したロジックを使い、Revitの内部原点近傍（フィート単位）にオフセットします。
+         2. 頂点溶接公差の拡大: セクション3.3のXyzEqualityComparerを使用し、頂点溶接のしきい値を、Revitの内部公差（2mm）をわずかに超える値（例：2.5mm / 0.0082ft）に設定します。
+         3. ターゲットの選定: TessellatedShapeBuilderのターゲットを、SolidからMeshに、フォールバックをSalvageに変更し、水密でないメッシュを許容します。
+これらの修正により、Revitのジオメトリカーネルが処理可能な、クリーンで安定したジオメトリが提供され、InternalExceptionおよびDirectShape検証エラーは解消されるものと期待されます。また、Revit 2026環境でInternalExceptionが継続する場合、SortedSet 10 の使用についてもコードベース全体を確認することが推奨されます。

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>PLATEAU CityGML Importer</Name>
+    <Assembly>PlateauRevitImporter.dll</Assembly>
+    <AddInId>8B7F5E3D-9C2A-4F1E-B8D6-3A7C9E2F1B4D</AddInId>
+    <FullClassName>PlateauRevitImporter.App</FullClassName>
+    <VendorId>MUSA</VendorId>
+    <VendorDescription>Musashino University Architecture Design</VendorDescription>
+  </AddIn>
+</RevitAddIns>
