@@ -51,6 +51,10 @@ namespace PlateauRevitImporter
                 CityGMLParser.CityObjectType detectedType = DetectFileType(gmlFilePath);
                 string targetTypeLabel = CityGMLParser.GetTypeDisplayName(detectedType);
 
+                // ステップ2.5: 既存のPLATEAUモデルをスキャン（解析前に行う必要がある）
+                CoordinateConverter.CoordinateOffset? existingOffset =
+                    CoordinateConverter.GetExistingOffset(doc);
+
                 int targetLod;
 
                 if (detectedType == CityGMLParser.CityObjectType.Building)
@@ -135,11 +139,25 @@ namespace PlateauRevitImporter
                     };
 
                     // ダイアログを表示せず、直接解析を開始（選択されたLODを渡す）
-                    parseResult = CityGMLParser.ParseCityGML(
-                        gmlFilePath,
-                        detectedType,
-                        parseProgressCallback,
-                        targetLod);
+                    // 追加インポートの場合は既存の参照点を使用
+                    if (existingOffset != null)
+                    {
+                        parseResult = CityGMLParser.ParseCityGML(
+                            gmlFilePath,
+                            detectedType,
+                            parseProgressCallback,
+                            targetLod,
+                            existingOffset.ReferenceLat,
+                            existingOffset.ReferenceLon);
+                    }
+                    else
+                    {
+                        parseResult = CityGMLParser.ParseCityGML(
+                            gmlFilePath,
+                            detectedType,
+                            parseProgressCallback,
+                            targetLod);
+                    }
                     cityObjects = parseResult.CityObjects;
                     usedLod = parseResult.MaxUsedLod;
 
@@ -200,15 +218,13 @@ namespace PlateauRevitImporter
                 CoordinateConverter.CoordinateOffset offset;
                 bool isAdditionalImport = false;
 
-                // 既存のPLATEAUモデルをスキャン
-                CoordinateConverter.CoordinateOffset? existingOffset =
-                    CoordinateConverter.GetExistingOffset(doc);
-
                 if (existingOffset != null)
                 {
 #if DEBUG
-                    // 追加インポート: 既存のオフセットを使用
-                    System.Diagnostics.Debug.WriteLine($"追加インポート: 既存オフセットを使用 X={existingOffset.OffsetX:F2}m, Y={existingOffset.OffsetY:F2}m, Z={existingOffset.OffsetZ:F2}m");
+                    // 追加インポート: 既存のオフセットと参照点を使用
+                    System.Diagnostics.Debug.WriteLine($"追加インポート: 既存オフセットを使用");
+                    System.Diagnostics.Debug.WriteLine($"参照点: ({existingOffset.ReferenceLat:F6}°, {existingOffset.ReferenceLon:F6}°)");
+                    System.Diagnostics.Debug.WriteLine($"オフセット: X={existingOffset.OffsetX:F2}m, Y={existingOffset.OffsetY:F2}m, Z={existingOffset.OffsetZ:F2}m");
 #endif
                     offset = existingOffset;
                     isAdditionalImport = true;
@@ -221,7 +237,11 @@ namespace PlateauRevitImporter
                     // デバッグ情報を一時保存（完了メッセージで表示）
                     System.Diagnostics.Debug.WriteLine($"初回インポート: バウンディングボックス最小値 Z={bboxMin.Z:F2}m");
 
-                    offset = CoordinateConverter.CalculateNewOffset(bboxMin);
+                    // ParseResultから参照点を取得
+                    offset = CoordinateConverter.CalculateNewOffset(
+                        bboxMin,
+                        parseResult.ReferenceLat,
+                        parseResult.ReferenceLon);
 
                     System.Diagnostics.Debug.WriteLine($"計算されたオフセット: X={offset.OffsetX:F2}m, Y={offset.OffsetY:F2}m, Z={offset.OffsetZ:F2}m");
 

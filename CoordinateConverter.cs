@@ -25,19 +25,23 @@ namespace PlateauRevitImporter
         public const string PlateauCategoryName = "PLATEAU_Imported_Model";
 
         /// <summary>
-        /// 座標のオフセット値（移動ベクトル）
+        /// 座標のオフセット値（移動ベクトル）と参照点
         /// </summary>
         public class CoordinateOffset
         {
             public double OffsetX { get; set; }
             public double OffsetY { get; set; }
             public double OffsetZ { get; set; }
+            public double ReferenceLat { get; set; }
+            public double ReferenceLon { get; set; }
 
-            public CoordinateOffset(double offsetX, double offsetY, double offsetZ)
+            public CoordinateOffset(double offsetX, double offsetY, double offsetZ, double referenceLat = 0, double referenceLon = 0)
             {
                 OffsetX = offsetX;
                 OffsetY = offsetY;
                 OffsetZ = offsetZ;
+                ReferenceLat = referenceLat;
+                ReferenceLon = referenceLon;
             }
         }
 
@@ -74,18 +78,19 @@ namespace PlateauRevitImporter
 
         /// <summary>
         /// 新しいオフセット値を計算（初回インポート時）
-        /// 固定参照点を使用してオフセットを計算（追加インポート時の一貫性を確保）
+        /// 動的参照点を使用してオフセットを計算
         /// </summary>
-        public static CoordinateOffset CalculateNewOffset(CityGMLParser.XYZ bboxMin)
+        public static CoordinateOffset CalculateNewOffset(CityGMLParser.XYZ bboxMin, double referenceLat, double referenceLon)
         {
             // 注意: bboxMinは既に参照点からの相対座標（メートル単位）
             // XY座標: オフセット = 0 で、すべてのインポートが同じ座標系を使用
             // Z座標: バウンディングボックスの最小値を引いて地面レベルを0にする
-            var offset = new CoordinateOffset(0, 0, -bboxMin.Z);
+            var offset = new CoordinateOffset(0, 0, -bboxMin.Z, referenceLat, referenceLon);
 
 #if DEBUG
             // デバッグ: 計算されたオフセットをログ出力
-            System.Diagnostics.Debug.WriteLine($"=== 計算されたオフセット（固定参照点方式） ===");
+            System.Diagnostics.Debug.WriteLine($"=== 計算されたオフセット（動的参照点方式） ===");
+            System.Diagnostics.Debug.WriteLine($"参照点: ({referenceLat:F6}°, {referenceLon:F6}°)");
             System.Diagnostics.Debug.WriteLine($"X={offset.OffsetX:F2}m, Y={offset.OffsetY:F2}m, Z={offset.OffsetZ:F2}m");
             System.Diagnostics.Debug.WriteLine($"参照点からの相対座標を直接使用（追加インポート対応）");
             System.Diagnostics.Debug.WriteLine($"Z座標: バウンディングボックス最小値={bboxMin.Z:F2}mを引いて地面レベルを0に調整");
@@ -135,7 +140,9 @@ namespace PlateauRevitImporter
                 {
                     OffsetX = offset.OffsetX,
                     OffsetY = offset.OffsetY,
-                    OffsetZ = offset.OffsetZ
+                    OffsetZ = offset.OffsetZ,
+                    ReferenceLat = offset.ReferenceLat,
+                    ReferenceLon = offset.ReferenceLon
                 });
 
                 Field? jsonField = schema.GetField(OffsetJsonFieldName);
@@ -177,7 +184,12 @@ namespace PlateauRevitImporter
                             var storage = JsonSerializer.Deserialize<OffsetStorageModel>(json);
                             if (storage != null)
                             {
-                                return new CoordinateOffset(storage.OffsetX, storage.OffsetY, storage.OffsetZ);
+                                return new CoordinateOffset(
+                                    storage.OffsetX,
+                                    storage.OffsetY,
+                                    storage.OffsetZ,
+                                    storage.ReferenceLat,
+                                    storage.ReferenceLon);
                             }
                         }
                         catch (JsonException)
@@ -279,6 +291,8 @@ namespace PlateauRevitImporter
             public double OffsetX { get; set; }
             public double OffsetY { get; set; }
             public double OffsetZ { get; set; }
+            public double ReferenceLat { get; set; }
+            public double ReferenceLon { get; set; }
         }
     }
 }

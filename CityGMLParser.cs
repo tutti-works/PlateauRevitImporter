@@ -40,6 +40,8 @@ namespace PlateauRevitImporter
         {
             public List<CityObjectGeometry> CityObjects { get; } = new List<CityObjectGeometry>();
             public int MaxUsedLod { get; set; } = 1;
+            public double ReferenceLat { get; set; }
+            public double ReferenceLon { get; set; }
         }
 
         /// <summary>
@@ -77,7 +79,9 @@ namespace PlateauRevitImporter
             string filePath,
             CityObjectType objectType = CityObjectType.Building,
             Action<int>? progressCallback = null,
-            int targetLod = 2)
+            int targetLod = 2,
+            double? overrideReferenceLat = null,
+            double? overrideReferenceLon = null)
         {
             ParseResult result = new ParseResult();
             List<CityObjectGeometry> cityObjects = result.CityObjects;
@@ -96,6 +100,25 @@ namespace PlateauRevitImporter
                 var root = doc.Root;
                 if (root == null)
                     throw new Exception("XMLファイルのルート要素が見つかりません");
+
+                // 参照点を設定（追加インポートの場合は既存の参照点を使用）
+                double centerLat, centerLon;
+                if (overrideReferenceLat.HasValue && overrideReferenceLon.HasValue)
+                {
+                    // 追加インポート: 既存の参照点を使用
+                    centerLat = overrideReferenceLat.Value;
+                    centerLon = overrideReferenceLon.Value;
+                }
+                else
+                {
+                    // 初回インポート: 動的参照点を計算（ファイルのバウンディングボックス中心）
+                    (centerLat, centerLon) = CalculateGeographicCenter(doc);
+                }
+
+                currentReferenceLat = centerLat;
+                currentReferenceLon = centerLon;
+                result.ReferenceLat = centerLat;
+                result.ReferenceLon = centerLon;
 
                 var elementLookup = BuildElementLookup(doc);
 
@@ -694,10 +717,12 @@ namespace PlateauRevitImporter
             }
         }
 
-        // 固定参照点（すべてのインポートで同じ座標系を使用）
-        // この値はプロジェクト全体で一貫している必要がある
-        private const double REFERENCE_LAT = 35.629;   // 参照緯度
-        private const double REFERENCE_LON = 139.781;  // 参照経度
+        // 動的参照点（ファイルごとに計算される）
+        // スレッドセーフではないが、Revitは単一スレッドで動作するため問題なし
+        [ThreadStatic]
+        private static double currentReferenceLat;
+        [ThreadStatic]
+        private static double currentReferenceLon;
 
         /// <summary>
         /// 緯度・経度をメートル単位の平面座標に変換
@@ -706,12 +731,70 @@ namespace PlateauRevitImporter
         /// </summary>
         private static XYZ ConvertLatLonToMeters(double latitude, double longitude, double height)
         {
-            // ヒュベニの公式で参照点からの距離を計算
-            var (x, y) = HubenyDistanceCalculator.Calculate(latitude, longitude, REFERENCE_LAT, REFERENCE_LON);
+            // 動的参照点を使用
+            var (x, y) = HubenyDistanceCalculator.Calculate(latitude, longitude, currentReferenceLat, currentReferenceLon);
 
             // 注意: Calculate()の戻り値は(経度差, 緯度差)なので、そのままX/Yに対応
             // X=経度(東西), Y=緯度(南北)
             return new XYZ(x, y, height);
+        }
+
+        /// <summary>
+        /// CityGML生座標（緯度経度）のバウンディングボックスを計算
+        /// 動的参照点の決定に使用
+        /// </summary>
+        public static (double minLat, double maxLat, double minLon, double maxLon) CalculateGeographicBounds(XDocument doc)
+        {
+            double minLat = double.MaxValue;
+            double maxLat = double.MinValue;
+            double minLon = double.MaxValue;
+            double maxLon = double.MinValue;
+
+            // すべてのposListとcoordinates要素から緯度経度を取得
+            var posLists = doc.Descendants()
+                .Where(e => e.Name.LocalName == "posList" || e.Name.LocalName == "coordinates");
+
+            foreach (var posList in posLists)
+            {
+                string[] coords = posList.Value.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+
+                for (int i = 0; i + 2 < coords.Length; i += 3)
+                {
+                    if (double.TryParse(coords[i], out double lat) &&
+                        double.TryParse(coords[i + 1], out double lon))
+                    {
+                        minLat = Math.Min(minLat, lat);
+                        maxLat = Math.Max(maxLat, lat);
+                        minLon = Math.Min(minLon, lon);
+                        maxLon = Math.Max(maxLon, lon);
+                    }
+                }
+            }
+
+            if (minLat == double.MaxValue)
+                throw new Exception("GMLファイルから緯度経度を取得できませんでした");
+
+            return (minLat, maxLat, minLon, maxLon);
+        }
+
+        /// <summary>
+        /// 地理座標バウンドの中心点を計算（動的参照点として使用）
+        /// </summary>
+        public static (double centerLat, double centerLon) CalculateGeographicCenter(XDocument doc)
+        {
+            var (minLat, maxLat, minLon, maxLon) = CalculateGeographicBounds(doc);
+
+            double centerLat = (minLat + maxLat) / 2.0;
+            double centerLon = (minLon + maxLon) / 2.0;
+
+#if DEBUG
+            System.Diagnostics.Debug.WriteLine($"=== 動的参照点計算 ===");
+            System.Diagnostics.Debug.WriteLine($"緯度範囲: {minLat:F6}° ～ {maxLat:F6}°");
+            System.Diagnostics.Debug.WriteLine($"経度範囲: {minLon:F6}° ～ {maxLon:F6}°");
+            System.Diagnostics.Debug.WriteLine($"中心点: ({centerLat:F6}°, {centerLon:F6}°)");
+#endif
+
+            return (centerLat, centerLon);
         }
 
 
