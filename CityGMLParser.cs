@@ -30,6 +30,16 @@ namespace PlateauRevitImporter
             public string ObjectId { get; set; } = string.Empty;
             public List<List<XYZ>> Surfaces { get; set; } = new List<List<XYZ>>();
             public string ClassName { get; set; } = string.Empty;
+            public int LodLevel { get; set; } = 1;
+        }
+
+        /// <summary>
+        /// CityGML解析結果
+        /// </summary>
+        public class ParseResult
+        {
+            public List<CityObjectGeometry> CityObjects { get; } = new List<CityObjectGeometry>();
+            public int MaxUsedLod { get; set; } = 1;
         }
 
         /// <summary>
@@ -63,13 +73,15 @@ namespace PlateauRevitImporter
         /// <param name="progressCallback">進捗報告用コールバック（0-95%）</param>
         /// <param name="targetLod">インポートするLODレベル（1=簡易, 2=詳細）</param>
         /// <returns>地物ジオメトリのリスト</returns>
-        public static List<CityObjectGeometry> ParseCityGML(
+        public static ParseResult ParseCityGML(
             string filePath,
             CityObjectType objectType = CityObjectType.Building,
             Action<int>? progressCallback = null,
             int targetLod = 2)
         {
-            List<CityObjectGeometry> cityObjects = new List<CityObjectGeometry>();
+            ParseResult result = new ParseResult();
+            List<CityObjectGeometry> cityObjects = result.CityObjects;
+            int globalMaxUsedLod = 0;
 
             try
             {
@@ -89,11 +101,13 @@ namespace PlateauRevitImporter
 
                 bool includeBuildings = objectType == CityObjectType.Building || objectType == CityObjectType.All;
                 bool includeRoads = objectType == CityObjectType.Road || objectType == CityObjectType.All;
+                bool includeBridges = objectType == CityObjectType.Bridge || objectType == CityObjectType.All;
 
                 var buildingElements = includeBuildings ? FindBuildingElements(doc) : new List<XElement>();
                 var roadElements = includeRoads ? FindRoadElements(doc) : new List<XElement>();
+                var bridgeElements = includeBridges ? FindBridgeElements(doc) : new List<XElement>();
 
-                int totalTargets = buildingElements.Count + roadElements.Count;
+                int totalTargets = buildingElements.Count + roadElements.Count + bridgeElements.Count;
 
                 if (totalTargets == 0)
                 {
@@ -118,6 +132,7 @@ namespace PlateauRevitImporter
                             if (building.Surfaces.Count > 0)
                             {
                                 cityObjects.Add(building);
+                                globalMaxUsedLod = Math.Max(globalMaxUsedLod, building.LodLevel);
                             }
                         }
                         catch (Exception ex)
@@ -151,6 +166,7 @@ namespace PlateauRevitImporter
                             if (road.Surfaces.Count > 0)
                             {
                                 cityObjects.Add(road);
+                                globalMaxUsedLod = Math.Max(globalMaxUsedLod, road.LodLevel);
                             }
                         }
                         catch (Exception ex)
@@ -168,6 +184,40 @@ namespace PlateauRevitImporter
                     }
                 }
 
+                if (includeBridges)
+                {
+                    int bridgeIndex = 0;
+                    foreach (var bridgeElement in bridgeElements)
+                    {
+                        try
+                        {
+                            var bridge = CreateCityObject(
+                                bridgeElement,
+                                CityObjectType.Bridge,
+                                targetLod,
+                                bridgeIndex,
+                                elementLookup);
+                            if (bridge.Surfaces.Count > 0)
+                            {
+                                cityObjects.Add(bridge);
+                                globalMaxUsedLod = Math.Max(globalMaxUsedLod, bridge.LodLevel);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+#if DEBUG
+                            System.Diagnostics.Debug.WriteLine($"橋の解析エラー: {ex.Message}");
+#endif
+                        }
+                        finally
+                        {
+                            bridgeIndex++;
+                            processedCount++;
+                            ReportProgress(progressCallback, processedCount, totalTargets);
+                        }
+                    }
+                }
+
                 if (cityObjects.Count == 0)
                 {
                     throw new Exception(
@@ -176,7 +226,8 @@ namespace PlateauRevitImporter
                     );
                 }
 
-                return cityObjects;
+                result.MaxUsedLod = globalMaxUsedLod > 0 ? globalMaxUsedLod : 1;
+                return result;
             }
             catch (System.Xml.XmlException xmlEx)
             {
@@ -218,6 +269,24 @@ namespace PlateauRevitImporter
             {
                 elements = doc.Descendants()
                     .Where(e => e.Name.LocalName == "Road")
+                    .ToList();
+            }
+
+            return elements;
+        }
+
+        private static List<XElement> FindBridgeElements(XDocument doc)
+        {
+            var elements = doc.Descendants()
+                .Where(e => e.Name.LocalName == "Bridge" &&
+                            (e.Name.Namespace.NamespaceName.Contains("bridge") ||
+                             e.Name.Namespace.NamespaceName.Contains("brid")))
+                .ToList();
+
+            if (elements.Count == 0)
+            {
+                elements = doc.Descendants()
+                    .Where(e => e.Name.LocalName == "Bridge")
                     .ToList();
             }
 
@@ -267,6 +336,7 @@ namespace PlateauRevitImporter
             var allDescendants = element.Descendants().ToList();
             int maxLod = GetMaxLodLevel(allDescendants);
             int useLod = DetermineTargetLod(targetLod, maxLod);
+            geometry.LodLevel = useLod;
 
             var posLists = allDescendants
                 .Where(IsPosListElement)
@@ -437,16 +507,17 @@ namespace PlateauRevitImporter
 
         private static int DetermineTargetLod(int requestedLod, int maxAvailableLod)
         {
-            if (requestedLod >= 2)
+            if (requestedLod == 0)
             {
-                if (maxAvailableLod >= 2)
-                    return 2;
-
-                if (maxAvailableLod >= 1)
-                    return 1;
+                return maxAvailableLod > 0 ? maxAvailableLod : 1;
             }
 
-            return 1;
+            if (maxAvailableLod == 0)
+            {
+                return requestedLod > 0 ? requestedLod : 1;
+            }
+
+            return Math.Min(requestedLod, maxAvailableLod);
         }
 
         private static void ReportProgress(Action<int>? progressCallback, int processed, int total)
@@ -458,13 +529,13 @@ namespace PlateauRevitImporter
             progressCallback(percent);
         }
 
-        private static string GetTypeDisplayName(CityObjectType type)
+        public static string GetTypeDisplayName(CityObjectType type)
         {
             return type switch
             {
                 CityObjectType.Road => "道路",
                 CityObjectType.Bridge => "橋",
-                CityObjectType.All => "建物・道路",
+                CityObjectType.All => "建物・道路・橋",
                 _ => "建物"
             };
         }
@@ -481,12 +552,14 @@ namespace PlateauRevitImporter
             {
                 string localName = element.Name.LocalName;
 
-                // LOD2要素をチェック
-                if (localName.StartsWith("lod2", StringComparison.OrdinalIgnoreCase))
+                if (localName.StartsWith("lod3", StringComparison.OrdinalIgnoreCase))
+                {
+                    maxLod = Math.Max(maxLod, 3);
+                }
+                else if (localName.StartsWith("lod2", StringComparison.OrdinalIgnoreCase))
                 {
                     maxLod = Math.Max(maxLod, 2);
                 }
-                // LOD1要素をチェック
                 else if (localName.StartsWith("lod1", StringComparison.OrdinalIgnoreCase))
                 {
                     maxLod = Math.Max(maxLod, 1);
@@ -508,17 +581,18 @@ namespace PlateauRevitImporter
             {
                 string localName = current.Name.LocalName;
 
-                // LOD2をチェック
-                if (localName.StartsWith("lod2", StringComparison.OrdinalIgnoreCase))
+                if (localName.StartsWith("lod3", StringComparison.OrdinalIgnoreCase))
+                {
+                    return 3;
+                }
+                else if (localName.StartsWith("lod2", StringComparison.OrdinalIgnoreCase))
                 {
                     return 2;
                 }
-                // LOD1をチェック
                 else if (localName.StartsWith("lod1", StringComparison.OrdinalIgnoreCase))
                 {
                     return 1;
                 }
-                // LOD0をチェック
                 else if (localName.StartsWith("lod0", StringComparison.OrdinalIgnoreCase))
                 {
                     return 0;

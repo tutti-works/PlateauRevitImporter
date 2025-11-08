@@ -3,6 +3,7 @@ using Autodesk.Revit.DB.ExtensibleStorage;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 
 namespace PlateauRevitImporter
 {
@@ -15,9 +16,10 @@ namespace PlateauRevitImporter
         // Extensible Storage用のGUID（このアドオン専用の一意なID）
         private static readonly Guid SchemaGuid = new Guid("A1B2C3D4-E5F6-7890-ABCD-EF1234567891"); // GUIDを変更（スキーマ変更のため）
         private static readonly string SchemaName = "PlateauImportData";
-        private static readonly string OffsetXFieldName = "OffsetX";
-        private static readonly string OffsetYFieldName = "OffsetY";
-        private static readonly string OffsetZFieldName = "OffsetZ";
+        private static readonly string OffsetJsonFieldName = "OffsetJson";
+        private static readonly string OffsetXFieldName = "OffsetX"; // 旧フィールド（互換用）
+        private static readonly string OffsetYFieldName = "OffsetY"; // 旧フィールド（互換用）
+        private static readonly string OffsetZFieldName = "OffsetZ"; // 旧フィールド（互換用）
 
         // PLATEAU識別用のサブカテゴリ名
         public const string PlateauCategoryName = "PLATEAU_Imported_Model";
@@ -124,33 +126,29 @@ namespace PlateauRevitImporter
         /// </summary>
         public static void SaveOffsetToElement(DirectShape shape, CoordinateOffset offset)
         {
-            // TODO: Extensible Storageの保存は一時的に無効化
-            // Revit 2025+のSpecTypeId互換性問題のため
-            // 将来的には、文字列フィールドとしてJSON形式で保存する方法を検討
-            return;
-
-            /*
             try
             {
-                // スキーマを取得または作成
                 Schema schema = GetOrCreateSchema();
-
-                // データエンティティを作成
                 Entity entity = new Entity(schema);
 
-                // 3つの個別のdoubleフィールドでオフセットを保存
-                entity.Set(schema.GetField(OffsetXFieldName), offset.OffsetX);
-                entity.Set(schema.GetField(OffsetYFieldName), offset.OffsetY);
-                entity.Set(schema.GetField(OffsetZFieldName), offset.OffsetZ);
+                string json = JsonSerializer.Serialize(new OffsetStorageModel
+                {
+                    OffsetX = offset.OffsetX,
+                    OffsetY = offset.OffsetY,
+                    OffsetZ = offset.OffsetZ
+                });
 
-                // DirectShapeに保存
+                Field? jsonField = schema.GetField(OffsetJsonFieldName);
+                if (jsonField == null)
+                    throw new InvalidOperationException("OffsetJsonフィールドを取得できません。");
+
+                entity.Set(jsonField, json);
                 shape.SetEntity(entity);
             }
             catch (Exception ex)
             {
                 throw new Exception($"オフセット情報の保存に失敗: {ex.Message}", ex);
             }
-            */
         }
 
         /// <summary>
@@ -168,10 +166,49 @@ namespace PlateauRevitImporter
                 if (!entity.IsValid())
                     return null;
 
-                // 3つの個別のdoubleフィールドから読み取り
-                double offsetX = entity.Get<double>(schema.GetField(OffsetXFieldName));
-                double offsetY = entity.Get<double>(schema.GetField(OffsetYFieldName));
-                double offsetZ = entity.Get<double>(schema.GetField(OffsetZFieldName));
+                Field? jsonField = schema.GetField(OffsetJsonFieldName);
+                if (jsonField != null)
+                {
+                    string? json = entity.Get<string>(jsonField);
+                    if (!string.IsNullOrWhiteSpace(json))
+                    {
+                        try
+                        {
+                            var storage = JsonSerializer.Deserialize<OffsetStorageModel>(json);
+                            if (storage != null)
+                            {
+                                return new CoordinateOffset(storage.OffsetX, storage.OffsetY, storage.OffsetZ);
+                            }
+                        }
+                        catch (JsonException)
+                        {
+                            // JSON形式でない場合は旧フォーマットを試みる
+                        }
+                    }
+                }
+
+                return TryReadLegacyOffset(entity, schema);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static CoordinateOffset? TryReadLegacyOffset(Entity entity, Schema schema)
+        {
+            try
+            {
+                Field? fieldX = schema.GetField(OffsetXFieldName);
+                Field? fieldY = schema.GetField(OffsetYFieldName);
+                Field? fieldZ = schema.GetField(OffsetZFieldName);
+
+                if (fieldX == null || fieldY == null || fieldZ == null)
+                    return null;
+
+                double offsetX = entity.Get<double>(fieldX);
+                double offsetY = entity.Get<double>(fieldY);
+                double offsetZ = entity.Get<double>(fieldZ);
 
                 return new CoordinateOffset(offsetX, offsetY, offsetZ);
             }
@@ -197,19 +234,9 @@ namespace PlateauRevitImporter
             schemaBuilder.SetReadAccessLevel(AccessLevel.Public);
             schemaBuilder.SetWriteAccessLevel(AccessLevel.Public);
 
-            // オフセット値を3つの個別のdoubleフィールドとして追加
-            // Revit 2025+では単位指定が必須 - 単位なし（Unitless）を使用
-            FieldBuilder fieldX = schemaBuilder.AddSimpleField(OffsetXFieldName, typeof(double));
-            fieldX.SetDocumentation("PLATEAU座標補正オフセット値 X (メートル単位)");
-            fieldX.SetSpec(SpecTypeId.Number); // 単位なしの数値
-
-            FieldBuilder fieldY = schemaBuilder.AddSimpleField(OffsetYFieldName, typeof(double));
-            fieldY.SetDocumentation("PLATEAU座標補正オフセット値 Y (メートル単位)");
-            fieldY.SetSpec(SpecTypeId.Number); // 単位なしの数値
-
-            FieldBuilder fieldZ = schemaBuilder.AddSimpleField(OffsetZFieldName, typeof(double));
-            fieldZ.SetDocumentation("PLATEAU座標補正オフセット値 Z (メートル単位)");
-            fieldZ.SetSpec(SpecTypeId.Number); // 単位なしの数値
+            FieldBuilder fieldJson = schemaBuilder.AddSimpleField(OffsetJsonFieldName, typeof(string));
+            fieldJson.SetDocumentation("PLATEAU座標補正オフセット値（JSON形式）");
+            // 文字列型にはSetSpecは不要（単位変換を使用しない型のため）
 
             return schemaBuilder.Finish();
         }
@@ -245,6 +272,13 @@ namespace PlateauRevitImporter
 
             // DirectShapeには親カテゴリを返す
             return genericModelCategory;
+        }
+
+        private class OffsetStorageModel
+        {
+            public double OffsetX { get; set; }
+            public double OffsetY { get; set; }
+            public double OffsetZ { get; set; }
         }
     }
 }

@@ -1,9 +1,9 @@
 # Phase 8-9: 道路・橋インポート機能 実装計画書（改訂版）
 
-**文書バージョン**: 2.0
+**文書バージョン**: 3.0
 **作成日**: 2025年11月7日
-**最終更新**: 2025年11月7日
-**ステータス**: 調査完了・実装計画確定
+**最終更新**: 2025年11月8日
+**ステータス**: ✅ Phase 8実装完了
 
 ---
 
@@ -16,6 +16,13 @@
 - ファイル名から地物タイプを100%自動判別可能
 - 道路のLOD1/LOD2は平面形状（Z=0）、**LOD3のみ立体形状**を持つ
 - 建物はLOD1/LOD2で実際の高さを持つ
+- 橋のLOD2は **Solid + MultiSurface の混合構造**
+
+**テストデータ**：
+本プロジェクトの `testgml/` フォルダに参照用のGMLファイルを配置：
+- `53393662_bldg_6697_op.gml` (11 MB) - 建物データ
+- `53393652_tran_6697_op.gml` (17 MB) - 道路データ
+- `53393652_brid_6697_op.gml` (23 MB) - 橋データ
 
 ---
 
@@ -54,14 +61,18 @@
 - LOD2: 626箇所出現
 - **LOD3: 446箇所出現**（実際の高さデータあり）
 
-#### 建物データとの比較
+#### 建物・道路・橋の比較
 
-| 項目 | 建物 (Building) | 道路 (Road) |
-|------|----------------|-------------|
-| **LOD1** | 箱型（実高さあり：5.3m～100m） | 平面（Z=0） |
-| **LOD2** | 詳細形状（窓・屋根、実高さあり） | 平面（Z=0） |
-| **LOD3** | （存在しない） | **立体形状（起伏あり）** |
-| **ジオメトリ型** | Solid（立体） | MultiSurface（面） |
+| 項目 | 建物 (Building) | 道路 (Road) | 橋 (Bridge) |
+|------|----------------|-------------|------------|
+| **LOD1** | 箱型（実高さあり：5.3m～100m） | 平面（Z=0） | （要調査） |
+| **LOD2** | 詳細形状（窓・屋根、実高さあり） | 平面（Z=0） | **立体形状** |
+| **LOD3** | （存在しない） | **立体形状（起伏あり）** | （要調査） |
+| **ジオメトリ型** | Solid（立体） | MultiSurface（面） | **Solid + MultiSurface（混合）** |
+
+**橋のLOD2構造**：
+- `lod2Solid`: 橋の本体（ボリューム）を `xlink:href` 参照で構成
+- `lod2MultiSurface`: 各部品（WallSurface、RoofSurface、GroundSurface、OuterCeilingSurface）を個別に定義
 
 ### XML構造例
 
@@ -395,11 +406,96 @@ string completionMessage = $"インポート完了\n\n" +
 ### 次のステップ
 1. ✅ Phase 7（パフォーマンス最適化）完了
 2. ✅ Phase 8の詳細調査完了
-3. ⏸ Phase 8の実装開始待ち
-4. 統合テストとドキュメント整備
+3. ✅ Phase 8の実装完了（道路・橋インポート機能）
+4. ✅ Zオフセット永続化機能の修復完了
+5. 統合テストとドキュメント整備
+
+---
+
+## 実装完了事項（2025-11-08）
+
+### Phase 8: 道路・橋インポート機能実装
+
+#### 実装内容
+1. **CityGMLParser.cs: 道路・橋対応の基盤実装**
+   - `CityObjectType` 列挙型追加（Building, Road, Bridge, All）
+   - `CityObjectGeometry` 汎用ジオメトリコンテナ
+   - `ParseCityGML()` メソッドの拡張（地物タイプ指定）
+   - XLink参照解決機能（橋のSolid構造対応）
+
+2. **GeometryBuilder.cs: 地物タイプ別処理**
+   - サブカテゴリ自動作成（PLATEAU_Road, PLATEAU_Bridge）
+   - DirectShape命名規則の拡張
+
+3. **ImportCommand.cs: UI改善**
+   - 地物タイプ選択ダイアログ追加
+   - 完了メッセージの詳細化（建物/道路/橋の個別カウント）
+   - インポートモード表示（新規/追加）
+
+#### Zオフセット永続化機能の修復
+
+**問題**: 各ファイルが独自のZオフセットを計算するため、建物と道路の高さが合わない
+
+**原因**:
+- Extensible Storage のオフセット保存機能が無効化されていた
+- 全インポートが「初回インポート」として扱われていた
+
+**修正内容**:
+
+1. **CoordinateConverter.cs: Extensible Storage実装**
+   - `GetOrCreateSchema()`: JSON文字列フィールドでオフセット保存
+   - `SetSpec()` 削除（文字列型には単位指定不要）
+   - `SaveOffsetToElement()`: JSON形式で保存
+   - `ReadOffsetFromElement()`: JSON形式で読み込み
+   - `GetExistingOffset()`: 既存要素からオフセット取得
+
+2. **ImportCommand.cs: オフセット保存タイミング最適化**
+   - DirectShape生成後、**最初の1要素にのみ**オフセット保存
+   - 初回インポート時のみ保存（追加インポートは既存値を再利用）
+
+3. **GeometryBuilder.cs: 不要な処理削除**
+   - ループ内の `SaveOffsetToElement()` 呼び出しを削除
+   - パフォーマンス改善（1000要素なら1000回→1回）
+
+**実装コード（ImportCommand.cs）**:
+```csharp
+// 初回インポートの場合のみ、最初の要素にオフセットを保存
+if (shapes.Count > 0 && !isAdditionalImport)
+{
+    CoordinateConverter.SaveOffsetToElement(shapes[0], offset);
+}
+```
+
+**実装コード（CoordinateConverter.cs）**:
+```csharp
+private static Schema GetOrCreateSchema()
+{
+    Schema schema = Schema.Lookup(SchemaGuid);
+    if (schema != null)
+        return schema;
+
+    SchemaBuilder schemaBuilder = new SchemaBuilder(SchemaGuid);
+    schemaBuilder.SetSchemaName(SchemaName);
+    schemaBuilder.SetReadAccessLevel(AccessLevel.Public);
+    schemaBuilder.SetWriteAccessLevel(AccessLevel.Public);
+
+    FieldBuilder fieldJson = schemaBuilder.AddSimpleField(OffsetJsonFieldName, typeof(string));
+    fieldJson.SetDocumentation("PLATEAU座標補正オフセット値（JSON形式）");
+    // 文字列型にはSetSpecは不要（単位変換を使用しない型のため）
+
+    return schemaBuilder.Finish();
+}
+```
+
+**効果**:
+- ✅ 建物インポート → オフセット保存（例: -42.5m）
+- ✅ 道路インポート → 既存オフセット再利用（-42.5m）
+- ✅ すべての地物が同じ基準点で配置される
+- ✅ 高さの不一致問題を解消
 
 ---
 
 **文書更新履歴**:
 - 2025-11-07: 初版作成（Phase 8-9の詳細計画）
 - 2025-11-07 (v2.0): 実際のGML構造調査結果を反映、UI改善計画追加、橋実装の詳細化
+- 2025-11-08 (v3.0): Phase 8実装完了、Zオフセット永続化修復完了を記録

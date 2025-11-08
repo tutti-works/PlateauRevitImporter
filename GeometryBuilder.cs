@@ -39,6 +39,7 @@ namespace PlateauRevitImporter
                     directShape.Name = cityObject.Type switch
                     {
                         CityGMLParser.CityObjectType.Road => $"PLATEAU_Road_{sanitizedId}",
+                        CityGMLParser.CityObjectType.Bridge => $"PLATEAU_Bridge_{sanitizedId}",
                         CityGMLParser.CityObjectType.Building => $"PLATEAU_Building_{sanitizedId}",
                         _ => $"PLATEAU_{sanitizedId}"
                     };
@@ -51,7 +52,6 @@ namespace PlateauRevitImporter
                     {
                         directShape.SetShape(geometries);
                         SetPlateauSubcategory(doc, directShape, cityObject.Type);
-                        CoordinateConverter.SaveOffsetToElement(directShape, offset);
                         createdShapes.Add(directShape);
                     }
                     else
