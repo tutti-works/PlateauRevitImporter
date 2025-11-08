@@ -118,104 +118,44 @@ namespace PlateauRevitImporter
 
                 if (includeBuildings)
                 {
-                    int buildingIndex = 0;
-                    foreach (var buildingElement in buildingElements)
-                    {
-                        try
-                        {
-                            var building = CreateCityObject(
-                                buildingElement,
-                                CityObjectType.Building,
-                                targetLod,
-                                buildingIndex,
-                                elementLookup);
-                            if (building.Surfaces.Count > 0)
-                            {
-                                cityObjects.Add(building);
-                                globalMaxUsedLod = Math.Max(globalMaxUsedLod, building.LodLevel);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-#if DEBUG
-                            System.Diagnostics.Debug.WriteLine($"建物の解析エラー: {ex.Message}");
-#endif
-                        }
-                        finally
-                        {
-                            buildingIndex++;
-                            processedCount++;
-                            ReportProgress(progressCallback, processedCount, totalTargets);
-                        }
-                    }
+                    ProcessCityObjectElements(
+                        buildingElements,
+                        CityObjectType.Building,
+                        targetLod,
+                        elementLookup,
+                        cityObjects,
+                        progressCallback,
+                        ref processedCount,
+                        totalTargets,
+                        ref globalMaxUsedLod);
                 }
 
                 if (includeRoads)
                 {
-                    int roadIndex = 0;
-                    foreach (var roadElement in roadElements)
-                    {
-                        try
-                        {
-                            var road = CreateCityObject(
-                                roadElement,
-                                CityObjectType.Road,
-                                targetLod,
-                                roadIndex,
-                                elementLookup);
-                            if (road.Surfaces.Count > 0)
-                            {
-                                cityObjects.Add(road);
-                                globalMaxUsedLod = Math.Max(globalMaxUsedLod, road.LodLevel);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-#if DEBUG
-                            System.Diagnostics.Debug.WriteLine($"道路の解析エラー: {ex.Message}");
-#endif
-                        }
-                        finally
-                        {
-                            roadIndex++;
-                            processedCount++;
-                            ReportProgress(progressCallback, processedCount, totalTargets);
-                        }
-                    }
+                    ProcessCityObjectElements(
+                        roadElements,
+                        CityObjectType.Road,
+                        targetLod,
+                        elementLookup,
+                        cityObjects,
+                        progressCallback,
+                        ref processedCount,
+                        totalTargets,
+                        ref globalMaxUsedLod);
                 }
 
                 if (includeBridges)
                 {
-                    int bridgeIndex = 0;
-                    foreach (var bridgeElement in bridgeElements)
-                    {
-                        try
-                        {
-                            var bridge = CreateCityObject(
-                                bridgeElement,
-                                CityObjectType.Bridge,
-                                targetLod,
-                                bridgeIndex,
-                                elementLookup);
-                            if (bridge.Surfaces.Count > 0)
-                            {
-                                cityObjects.Add(bridge);
-                                globalMaxUsedLod = Math.Max(globalMaxUsedLod, bridge.LodLevel);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-#if DEBUG
-                            System.Diagnostics.Debug.WriteLine($"橋の解析エラー: {ex.Message}");
-#endif
-                        }
-                        finally
-                        {
-                            bridgeIndex++;
-                            processedCount++;
-                            ReportProgress(progressCallback, processedCount, totalTargets);
-                        }
-                    }
+                    ProcessCityObjectElements(
+                        bridgeElements,
+                        CityObjectType.Bridge,
+                        targetLod,
+                        elementLookup,
+                        cityObjects,
+                        progressCallback,
+                        ref processedCount,
+                        totalTargets,
+                        ref globalMaxUsedLod);
                 }
 
                 if (cityObjects.Count == 0)
@@ -363,6 +303,50 @@ namespace PlateauRevitImporter
             AddReferencedSurfaces(geometry, element, useLod, elementLookup);
 
             return geometry;
+        }
+
+        private static void ProcessCityObjectElements(
+            List<XElement> elements,
+            CityObjectType type,
+            int targetLod,
+            Dictionary<string, XElement> elementLookup,
+            List<CityObjectGeometry> cityObjects,
+            Action<int>? progressCallback,
+            ref int processedCount,
+            int totalTargets,
+            ref int globalMaxUsedLod)
+        {
+            int elementIndex = 0;
+
+            foreach (var element in elements)
+            {
+                try
+                {
+                    var cityObject = CreateCityObject(
+                        element,
+                        type,
+                        targetLod,
+                        elementIndex,
+                        elementLookup);
+                    if (cityObject.Surfaces.Count > 0)
+                    {
+                        cityObjects.Add(cityObject);
+                        globalMaxUsedLod = Math.Max(globalMaxUsedLod, cityObject.LodLevel);
+                    }
+                }
+                catch (Exception ex)
+                {
+#if DEBUG
+                    System.Diagnostics.Debug.WriteLine($"{GetTypeDisplayName(type)}の解析エラー: {ex.Message}");
+#endif
+                }
+                finally
+                {
+                    elementIndex++;
+                    processedCount++;
+                    ReportProgress(progressCallback, processedCount, totalTargets);
+                }
+            }
         }
 
         private static string ResolveObjectId(XElement element, CityObjectType type, int fallbackIndex)
