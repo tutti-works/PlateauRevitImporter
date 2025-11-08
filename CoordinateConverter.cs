@@ -21,9 +21,6 @@ namespace PlateauRevitImporter
         private static readonly string OffsetYFieldName = "OffsetY"; // 旧フィールド（互換用）
         private static readonly string OffsetZFieldName = "OffsetZ"; // 旧フィールド（互換用）
 
-        // PLATEAU識別用のサブカテゴリ名
-        public const string PlateauCategoryName = "PLATEAU_Imported_Model";
-
         /// <summary>
         /// 座標のオフセット値（移動ベクトル）と参照点
         /// </summary>
@@ -260,30 +257,7 @@ namespace PlateauRevitImporter
         public static Category GetOrCreatePlateauCategory(Document doc)
         {
             // 汎用モデルカテゴリを取得
-            Category genericModelCategory = doc.Settings.Categories.get_Item(BuiltInCategory.OST_GenericModel);
-
-            // サブカテゴリの存在確認と作成
-            bool subCategoryExists = false;
-            foreach (Category subCat in genericModelCategory.SubCategories)
-            {
-                if (subCat.Name == PlateauCategoryName)
-                {
-                    subCategoryExists = true;
-                    break;
-                }
-            }
-
-            // サブカテゴリが存在しない場合は作成
-            if (!subCategoryExists)
-            {
-                doc.Settings.Categories.NewSubcategory(
-                    genericModelCategory,
-                    PlateauCategoryName
-                );
-            }
-
-            // DirectShapeには親カテゴリを返す
-            return genericModelCategory;
+            return doc.Settings.Categories.get_Item(BuiltInCategory.OST_GenericModel);
         }
 
         private class OffsetStorageModel

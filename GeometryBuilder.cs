@@ -13,6 +13,11 @@ namespace PlateauRevitImporter
         // エラーログ収集用
         public static List<string> ErrorLog { get; private set; } = new List<string>();
 
+        // マテリアル名の定数
+        private const string BuildingMaterialName = "PLATEAU_Building_Material";
+        private const string RoadMaterialName = "PLATEAU_Road_Material";
+        private const string BridgeMaterialName = "PLATEAU_Bridge_Material";
+
         /// <summary>
         /// 建物データからDirectShapeを生成してRevitドキュメントに追加
         /// </summary>
@@ -44,14 +49,16 @@ namespace PlateauRevitImporter
                         _ => $"PLATEAU_{sanitizedId}"
                     };
 
-                    List<GeometryObject> geometries = CreateCityObjectGeometry(cityObject, offset);
+                    // 地物タイプに応じたマテリアルを取得
+                    ElementId materialId = GetOrCreateMaterial(doc, cityObject.Type);
+
+                    List<GeometryObject> geometries = CreateCityObjectGeometry(cityObject, offset, materialId);
                     int surfaceCount = geometries.Count;
                     int failedSurfaceCount = cityObject.Surfaces.Count - surfaceCount;
 
                     if (geometries.Count > 0)
                     {
                         directShape.SetShape(geometries);
-                        SetPlateauSubcategory(doc, directShape, cityObject.Type);
                         createdShapes.Add(directShape);
                     }
                     else
@@ -79,55 +86,6 @@ namespace PlateauRevitImporter
         }
 
         /// <summary>
-        /// DirectShapeにPLATEAUサブカテゴリを設定
-        /// </summary>
-        private static void SetPlateauSubcategory(
-            Document doc,
-            DirectShape directShape,
-            CityGMLParser.CityObjectType type)
-        {
-            try
-            {
-                string subCategoryName = type switch
-                {
-                    CityGMLParser.CityObjectType.Road => "PLATEAU_Road",
-                    CityGMLParser.CityObjectType.Bridge => "PLATEAU_Bridge",
-                    _ => CoordinateConverter.PlateauCategoryName
-                };
-
-                Category? targetSubCategory = GetOrCreateSubCategory(doc, subCategoryName);
-                if (targetSubCategory != null)
-                {
-                    Parameter? param = directShape.get_Parameter(BuiltInParameter.FAMILY_ELEM_SUBCATEGORY);
-                    if (param != null && !param.IsReadOnly)
-                    {
-                        param.Set(targetSubCategory.Id);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"サブカテゴリ設定エラー: {ex.Message}");
-            }
-        }
-        private static Category? GetOrCreateSubCategory(Document doc, string subCategoryName)
-        {
-            Category genericModelCategory = doc.Settings.Categories.get_Item(BuiltInCategory.OST_GenericModel);
-            Category? subCategory = null;
-            foreach (Category subCat in genericModelCategory.SubCategories)
-            {
-                if (subCat.Name == subCategoryName)
-                {
-                    subCategory = subCat;
-                    break;
-                }
-            }
-
-            subCategory ??= doc.Settings.Categories.NewSubcategory(genericModelCategory, subCategoryName);
-            return subCategory;
-        }
-
-        /// <summary>
         /// Building IDをRevitの名前規則に適合するようサニタイズ
         /// </summary>
         /// CityGML IDをRevitの命名規則に適合させる
@@ -152,13 +110,63 @@ namespace PlateauRevitImporter
         }
 
         /// <summary>
+        /// 地物タイプに応じたマテリアルを取得または作成
+        /// </summary>
+        private static ElementId GetOrCreateMaterial(Document doc, CityGMLParser.CityObjectType type)
+        {
+            string materialName = type switch
+            {
+                CityGMLParser.CityObjectType.Building => BuildingMaterialName,
+                CityGMLParser.CityObjectType.Road => RoadMaterialName,
+                CityGMLParser.CityObjectType.Bridge => BridgeMaterialName,
+                _ => BuildingMaterialName
+            };
+
+            // 既存のマテリアルを検索
+            FilteredElementCollector collector = new FilteredElementCollector(doc);
+            Material? existingMaterial = collector
+                .OfClass(typeof(Material))
+                .Cast<Material>()
+                .FirstOrDefault(m => m.Name == materialName);
+
+            if (existingMaterial != null)
+            {
+                return existingMaterial.Id;
+            }
+
+            // マテリアルが存在しない場合は作成
+            ElementId materialId = Material.Create(doc, materialName);
+            Material material = doc.GetElement(materialId) as Material;
+
+            if (material != null)
+            {
+                // 地物タイプごとに色を設定
+                Color color = type switch
+                {
+                    CityGMLParser.CityObjectType.Building => new Color(200, 200, 200),  // ライトグレー
+                    CityGMLParser.CityObjectType.Road => new Color(80, 80, 80),        // ダークグレー
+                    CityGMLParser.CityObjectType.Bridge => new Color(140, 140, 140),   // ミディアムグレー
+                    _ => new Color(200, 200, 200)
+                };
+
+                material.Color = color;
+                material.Shininess = 0;  // マット仕上げ
+                material.Smoothness = 30;
+                material.Transparency = 0;
+            }
+
+            return materialId;
+        }
+
+        /// <summary>
         /// 建物全体のジオメトリを作成（各面を個別のMeshとして処理）
         /// </summary>
         /// 地物ジオメトリをDirectShape用のGeometryObjectに変換
         /// </summary>
         private static List<GeometryObject> CreateCityObjectGeometry(
             CityGMLParser.CityObjectGeometry cityObject,
-            CoordinateConverter.CoordinateOffset offset)
+            CoordinateConverter.CoordinateOffset offset,
+            ElementId materialId)
         {
             List<GeometryObject> geometries = new List<GeometryObject>();
             int successfulSurfaces = 0;
@@ -172,7 +180,7 @@ namespace PlateauRevitImporter
                         .Select(p => CoordinateConverter.ApplyOffset(p, offset))
                         .ToList();
 
-                    GeometryObject? geom = CreateMeshFromPoints(convertedPoints);
+                    GeometryObject? geom = CreateMeshFromPoints(convertedPoints, materialId);
                     if (geom != null)
                     {
                         geometries.Add(geom);
@@ -198,7 +206,7 @@ namespace PlateauRevitImporter
         /// <summary>
         /// 点リストから直接ジオメトリを作成
         /// </summary>
-        private static GeometryObject? CreateMeshFromPoints(List<XYZ> points)
+        private static GeometryObject? CreateMeshFromPoints(List<XYZ> points, ElementId materialId)
         {
             try
             {
@@ -249,7 +257,8 @@ namespace PlateauRevitImporter
                 // Blender版と同様に、多角形をそのまま1つの面として追加（三角形分割なし）
                 try
                 {
-                    TessellatedFace face = new TessellatedFace(uniquePoints, ElementId.InvalidElementId);
+                    IList<IList<XYZ>> loops = new List<IList<XYZ>> { uniquePoints };
+                    TessellatedFace face = new TessellatedFace(loops, materialId);
                     builder.AddFace(face);
                 }
                 catch (Exception ex)
@@ -289,7 +298,7 @@ namespace PlateauRevitImporter
         /// <summary>
         /// 面の頂点リストからMeshを作成（Solidより堅牢）
         /// </summary>
-        private static GeometryObject? CreateMeshFromSurface(List<XYZ> points)
+        private static GeometryObject? CreateMeshFromSurface(List<XYZ> points, ElementId materialId)
         {
             try
             {
@@ -378,7 +387,8 @@ namespace PlateauRevitImporter
                 {
                     try
                     {
-                        TessellatedFace face = new TessellatedFace(triangle, ElementId.InvalidElementId);
+                        IList<IList<XYZ>> loops = new List<IList<XYZ>> { triangle };
+                        TessellatedFace face = new TessellatedFace(loops, materialId);
                         builder.AddFace(face);
                         addedFaceCount++;
                     }

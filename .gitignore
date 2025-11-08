@@ -367,3 +367,5 @@ FodyWeavers.xsd
 
 # Test GML files
 testgml/
+
+img/
