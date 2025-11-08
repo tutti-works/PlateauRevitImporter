@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Xml.Linq;
@@ -11,12 +11,25 @@ namespace PlateauRevitImporter
     public class CityGMLParser
     {
         /// <summary>
-        /// 建物の3D形状データ
+        /// CityGML地物タイプ
         /// </summary>
-        public class BuildingGeometry
+        public enum CityObjectType
         {
-            public string BuildingId { get; set; } = string.Empty;
+            Building,
+            Road,
+            Bridge,
+            All
+        }
+
+        /// <summary>
+        /// 汎用ジオメトリコンテナ
+        /// </summary>
+        public class CityObjectGeometry
+        {
+            public CityObjectType Type { get; set; } = CityObjectType.Building;
+            public string ObjectId { get; set; } = string.Empty;
             public List<List<XYZ>> Surfaces { get; set; } = new List<List<XYZ>>();
+            public string ClassName { get; set; } = string.Empty;
         }
 
         /// <summary>
@@ -40,146 +53,130 @@ namespace PlateauRevitImporter
         private static readonly XNamespace gmlNs = "http://www.opengis.net/gml";
         private static readonly XNamespace coreNs = "http://www.opengis.net/citygml/2.0";
         private static readonly XNamespace bldgNs = "http://www.opengis.net/citygml/building/2.0";
+        private static readonly XNamespace xlinkNs = "http://www.w3.org/1999/xlink";
 
-        /// <summary>
-        /// CityGMLファイルから建物データを解析する
+                /// <summary>
+        /// CityGMLファイルから指定タイプの地物ジオメトリを解析
         /// </summary>
         /// <param name="filePath">CityGMLファイルのパス</param>
-        /// <param name="progressCallback">進捗報告用のコールバック（オプション）</param>
-        /// <param name="targetLod">インポートするLODレベル（1=簡易、2=詳細）</param>
-        /// <returns>建物ジオメトリのリスト</returns>
-        public static List<BuildingGeometry> ParseCityGML(string filePath, Action<int>? progressCallback = null, int targetLod = 2)
+        /// <param name="objectType">解析対象の地物タイプ</param>
+        /// <param name="progressCallback">進捗報告用コールバック（0-95%）</param>
+        /// <param name="targetLod">インポートするLODレベル（1=簡易, 2=詳細）</param>
+        /// <returns>地物ジオメトリのリスト</returns>
+        public static List<CityObjectGeometry> ParseCityGML(
+            string filePath,
+            CityObjectType objectType = CityObjectType.Building,
+            Action<int>? progressCallback = null,
+            int targetLod = 2)
         {
-            List<BuildingGeometry> buildings = new List<BuildingGeometry>();
+            List<CityObjectGeometry> cityObjects = new List<CityObjectGeometry>();
 
             try
             {
-                // XMLファイルを読み込み（大容量ファイルに対応）
+                // XMLファイルを読み込み（大容量ファイル対応）
                 XDocument doc;
                 using (var stream = System.IO.File.OpenRead(filePath))
                 {
                     doc = XDocument.Load(stream, LoadOptions.None);
                 }
 
-                // 名前空間を動的に取得
+                // ルート要素の存在確認
                 var root = doc.Root;
                 if (root == null)
                     throw new Exception("XMLファイルのルート要素が見つかりません");
 
-                // bldg:Building要素をすべて取得（名前空間のバリエーションに対応）
-                // 最適化: Building要素のみを厳密に抽出し、即座にリスト化してキャッシュ
-                var buildingElements = doc.Descendants()
-                    .Where(e => e.Name.LocalName == "Building" &&
-                                (e.Name.Namespace.NamespaceName.Contains("building") ||
-                                 e.Name.Namespace.NamespaceName.Contains("bldg")))
-                    .ToList();
+                var elementLookup = BuildElementLookup(doc);
 
-                // フォールバック: 名前空間が見つからない場合のみ緩い条件で再検索
-                if (buildingElements.Count == 0)
+                bool includeBuildings = objectType == CityObjectType.Building || objectType == CityObjectType.All;
+                bool includeRoads = objectType == CityObjectType.Road || objectType == CityObjectType.All;
+
+                var buildingElements = includeBuildings ? FindBuildingElements(doc) : new List<XElement>();
+                var roadElements = includeRoads ? FindRoadElements(doc) : new List<XElement>();
+
+                int totalTargets = buildingElements.Count + roadElements.Count;
+
+                if (totalTargets == 0)
                 {
-                    buildingElements = doc.Descendants()
-                        .Where(e => e.Name.LocalName == "Building")
-                        .ToList();
+                    throw new Exception($"{GetTypeDisplayName(objectType)}のCityGML要素が見つかりませんでした。");
                 }
 
-                int processedBuildings = 0;
-                int totalBuildings = buildingElements.Count;
+                int processedCount = 0;
 
-                foreach (var buildingElement in buildingElements)
+                if (includeBuildings)
                 {
-                    try
+                    int buildingIndex = 0;
+                    foreach (var buildingElement in buildingElements)
                     {
-                        BuildingGeometry building = new BuildingGeometry();
-
-                        // Building IDを取得（複数の属性名に対応）
-                        var idAttr = buildingElement.Attribute(gmlNs + "id") ??
-                                     buildingElement.Attribute("id") ??
-                                     buildingElement.Attributes().FirstOrDefault(a => a.Name.LocalName == "id");
-
-                        building.BuildingId = idAttr?.Value ?? $"Building_{processedBuildings}";
-
-                        // 最適化: すべてのDescendantsを一度だけ取得（キャッシュ）
-                        var allDescendants = buildingElement.Descendants().ToList();
-
-                        // 最高LODを検出（LOD2 > LOD1）
-                        int maxLod = GetMaxLodLevel(allDescendants);
-
-                        // ユーザーが選択したLODに基づいて使用するLODを決定
-                        int useLod = targetLod;
-                        if (targetLod == 2 && maxLod < 2)
+                        try
                         {
-                            // LOD2を選択したがデータにLOD2がない場合、LOD1にフォールバック
-                            useLod = 1;
-                        }
-                        else if (targetLod == 1)
-                        {
-                            // LOD1を明示的に選択した場合、LOD2があってもLOD1を使用
-                            useLod = 1;
-                        }
-
-#if DEBUG
-                        System.Diagnostics.Debug.WriteLine($"建物 {building.BuildingId}: 最高LOD={maxLod}, 使用LOD={useLod}");
-#endif
-
-                        // 指定されたLODのposList要素のみを抽出（LOD0は常に除外）
-                        var posLists = allDescendants
-                            .Where(e => (e.Name.LocalName == "posList" || e.Name.LocalName == "coordinates") &&
-                                       !IsLOD0Element(e) &&
-                                       GetLodLevel(e) == useLod);
-
-                        foreach (var posList in posLists)
-                        {
-                            try
+                            var building = CreateCityObject(
+                                buildingElement,
+                                CityObjectType.Building,
+                                targetLod,
+                                buildingIndex,
+                                elementLookup);
+                            if (building.Surfaces.Count > 0)
                             {
-                                List<XYZ> surface = ParsePosList(posList.Value);
-                                if (surface.Count >= 3) // 最低3点必要（三角形）
-                                {
-                                    building.Surfaces.Add(surface);
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-#if DEBUG
-                                // 個別の面の解析エラーはスキップ
-                                System.Diagnostics.Debug.WriteLine($"面の解析エラー: {ex.Message}");
-#endif
+                                cityObjects.Add(building);
                             }
                         }
-
-                        // 有効な面を持つ建物のみ追加
-                        if (building.Surfaces.Count > 0)
+                        catch (Exception ex)
                         {
-                            buildings.Add(building);
-                        }
-
-                        processedBuildings++;
-
-                        // 進捗報告（0-95%の範囲で報告）
-                        if (progressCallback != null && totalBuildings > 0)
-                        {
-                            int percent = (int)((processedBuildings / (double)totalBuildings) * 95);
-                            progressCallback(percent);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
 #if DEBUG
-                        // 個別の建物の解析エラーはスキップして続行
-                        System.Diagnostics.Debug.WriteLine($"建物の解析エラー: {ex.Message}");
+                            System.Diagnostics.Debug.WriteLine($"建物の解析エラー: {ex.Message}");
 #endif
+                        }
+                        finally
+                        {
+                            buildingIndex++;
+                            processedCount++;
+                            ReportProgress(progressCallback, processedCount, totalTargets);
+                        }
                     }
                 }
 
-                if (buildings.Count == 0)
+                if (includeRoads)
+                {
+                    int roadIndex = 0;
+                    foreach (var roadElement in roadElements)
+                    {
+                        try
+                        {
+                            var road = CreateCityObject(
+                                roadElement,
+                                CityObjectType.Road,
+                                targetLod,
+                                roadIndex,
+                                elementLookup);
+                            if (road.Surfaces.Count > 0)
+                            {
+                                cityObjects.Add(road);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+#if DEBUG
+                            System.Diagnostics.Debug.WriteLine($"道路の解析エラー: {ex.Message}");
+#endif
+                        }
+                        finally
+                        {
+                            roadIndex++;
+                            processedCount++;
+                            ReportProgress(progressCallback, processedCount, totalTargets);
+                        }
+                    }
+                }
+
+                if (cityObjects.Count == 0)
                 {
                     throw new Exception(
-                        "有効な建物データが見つかりませんでした。\n" +
-                        "このファイルはCityGML 2.0形式ですか？\n" +
-                        "建物（bldg:Building）要素が含まれているか確認してください。"
+                        $"有効な{GetTypeDisplayName(objectType)}ジオメトリが見つかりませんでした。\n" +
+                        "LOD設定やCityGMLファイル内容をご確認ください。"
                     );
                 }
 
-                return buildings;
+                return cityObjects;
             }
             catch (System.Xml.XmlException xmlEx)
             {
@@ -191,6 +188,286 @@ namespace PlateauRevitImporter
             }
         }
 
+        private static List<XElement> FindBuildingElements(XDocument doc)
+        {
+            var elements = doc.Descendants()
+                .Where(e => e.Name.LocalName == "Building" &&
+                            (e.Name.Namespace.NamespaceName.Contains("building") ||
+                             e.Name.Namespace.NamespaceName.Contains("bldg")))
+                .ToList();
+
+            if (elements.Count == 0)
+            {
+                elements = doc.Descendants()
+                    .Where(e => e.Name.LocalName == "Building")
+                    .ToList();
+            }
+
+            return elements;
+        }
+
+        private static List<XElement> FindRoadElements(XDocument doc)
+        {
+            var elements = doc.Descendants()
+                .Where(e => e.Name.LocalName == "Road" &&
+                            (e.Name.Namespace.NamespaceName.Contains("transportation") ||
+                                e.Name.Namespace.NamespaceName.Contains("tran")))
+                .ToList();
+
+            if (elements.Count == 0)
+            {
+                elements = doc.Descendants()
+                    .Where(e => e.Name.LocalName == "Road")
+                    .ToList();
+            }
+
+            return elements;
+        }
+
+        private static Dictionary<string, XElement> BuildElementLookup(XDocument doc)
+        {
+            Dictionary<string, XElement> lookup = new Dictionary<string, XElement>();
+
+            foreach (var element in doc.Descendants())
+            {
+                var idAttr = element.Attribute(gmlNs + "id") ??
+                             element.Attribute("id") ??
+                             element.Attributes().FirstOrDefault(a => a.Name.LocalName == "id");
+
+                if (idAttr == null)
+                    continue;
+
+                string idValue = idAttr.Value;
+                if (string.IsNullOrWhiteSpace(idValue))
+                    continue;
+
+                if (!lookup.ContainsKey(idValue))
+                {
+                    lookup[idValue] = element;
+                }
+            }
+
+            return lookup;
+        }
+
+        private static CityObjectGeometry CreateCityObject(
+            XElement element,
+            CityObjectType type,
+            int targetLod,
+            int fallbackIndex,
+            Dictionary<string, XElement> elementLookup)
+        {
+            CityObjectGeometry geometry = new CityObjectGeometry
+            {
+                Type = type,
+                ObjectId = ResolveObjectId(element, type, fallbackIndex),
+                ClassName = ExtractClassName(element)
+            };
+
+            var allDescendants = element.Descendants().ToList();
+            int maxLod = GetMaxLodLevel(allDescendants);
+            int useLod = DetermineTargetLod(targetLod, maxLod);
+
+            var posLists = allDescendants
+                .Where(IsPosListElement)
+                .Where(e => !IsLOD0Element(e) && GetLodLevel(e) == useLod);
+
+            foreach (var posList in posLists)
+            {
+                try
+                {
+                    List<XYZ> surface = ParsePosList(posList.Value);
+                    if (surface.Count >= 3)
+                    {
+                        geometry.Surfaces.Add(surface);
+                    }
+                }
+                catch (Exception ex)
+                {
+#if DEBUG
+                    System.Diagnostics.Debug.WriteLine($"面の解析エラー ({geometry.ObjectId}): {ex.Message}");
+#endif
+                }
+            }
+
+            AddReferencedSurfaces(geometry, element, useLod, elementLookup);
+
+            return geometry;
+        }
+
+        private static string ResolveObjectId(XElement element, CityObjectType type, int fallbackIndex)
+        {
+            var idAttr = element.Attribute(gmlNs + "id") ??
+                         element.Attribute("id") ??
+                         element.Attributes().FirstOrDefault(a => a.Name.LocalName == "id");
+
+            if (idAttr != null && !string.IsNullOrWhiteSpace(idAttr.Value))
+            {
+                return idAttr.Value;
+            }
+
+            string prefix = type switch
+            {
+                CityObjectType.Road => "Road",
+                CityObjectType.Bridge => "Bridge",
+                CityObjectType.All => "CityObject",
+                _ => "Building"
+            };
+
+            return $"{prefix}_{fallbackIndex}";
+        }
+
+        private static string ExtractClassName(XElement element)
+        {
+            var classElement = element.Descendants()
+                .FirstOrDefault(e => e.Name.LocalName.Equals("class", StringComparison.OrdinalIgnoreCase));
+
+            return classElement?.Value?.Trim() ?? string.Empty;
+        }
+
+        private static bool IsPosListElement(XElement element)
+        {
+            string localName = element.Name.LocalName;
+            return localName == "posList" || localName == "coordinates";
+        }
+
+        private static void AddReferencedSurfaces(
+            CityObjectGeometry geometry,
+            XElement sourceElement,
+            int useLod,
+            Dictionary<string, XElement> elementLookup)
+        {
+            var referenceElements = sourceElement
+                .Descendants()
+                .Where(e => e.Attribute(xlinkNs + "href") != null)
+                .ToList();
+
+            HashSet<string> processedReferences = new HashSet<string>();
+
+            foreach (var reference in referenceElements)
+            {
+                int lodLevel = GetLodLevel(reference);
+                if (lodLevel != useLod)
+                    continue;
+
+                string? hrefValue = reference.Attribute(xlinkNs + "href")?.Value;
+                if (string.IsNullOrEmpty(hrefValue))
+                    continue;
+
+                string targetId = hrefValue.TrimStart('#');
+                if (string.IsNullOrEmpty(targetId))
+                    continue;
+
+                // Avoid processing the same referenced geometry multiple times per CityObject
+                if (!processedReferences.Add(targetId))
+                    continue;
+
+                if (!elementLookup.TryGetValue(targetId, out XElement? referencedElement))
+                    continue;
+
+                foreach (var posList in ResolveReferencedPosLists(referencedElement, elementLookup, new HashSet<string>()))
+                {
+                    try
+                    {
+                        List<XYZ> surface = ParsePosList(posList.Value);
+                        if (surface.Count >= 3)
+                        {
+                            geometry.Surfaces.Add(surface);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+#if DEBUG
+                        System.Diagnostics.Debug.WriteLine($"参照ポリゴンの解析エラー ({geometry.ObjectId}): {ex.Message}");
+#endif
+                    }
+                }
+            }
+        }
+
+        private static IEnumerable<XElement> ResolveReferencedPosLists(
+            XElement rootElement,
+            Dictionary<string, XElement> elementLookup,
+            HashSet<string> visitedIds)
+        {
+            string? rootId = GetElementId(rootElement);
+            if (!string.IsNullOrEmpty(rootId))
+            {
+                visitedIds.Add(rootId);
+            }
+
+            foreach (var posList in rootElement.Descendants().Where(IsPosListElement))
+            {
+                yield return posList;
+            }
+
+            var nestedReferences = rootElement
+                .Descendants()
+                .Where(e => e.Attribute(xlinkNs + "href") != null);
+
+            foreach (var reference in nestedReferences)
+            {
+                string? hrefValue = reference.Attribute(xlinkNs + "href")?.Value;
+                if (string.IsNullOrEmpty(hrefValue))
+                    continue;
+
+                string targetId = hrefValue.TrimStart('#');
+                if (string.IsNullOrEmpty(targetId))
+                    continue;
+
+                if (!visitedIds.Add(targetId))
+                    continue;
+
+                if (elementLookup.TryGetValue(targetId, out XElement? referencedElement))
+                {
+                    foreach (var posList in ResolveReferencedPosLists(referencedElement, elementLookup, visitedIds))
+                    {
+                        yield return posList;
+                    }
+                }
+            }
+        }
+
+        private static string? GetElementId(XElement element)
+        {
+            return element.Attribute(gmlNs + "id")?.Value ??
+                   element.Attribute("id")?.Value ??
+                   element.Attributes().FirstOrDefault(a => a.Name.LocalName == "id")?.Value;
+        }
+
+        private static int DetermineTargetLod(int requestedLod, int maxAvailableLod)
+        {
+            if (requestedLod >= 2)
+            {
+                if (maxAvailableLod >= 2)
+                    return 2;
+
+                if (maxAvailableLod >= 1)
+                    return 1;
+            }
+
+            return 1;
+        }
+
+        private static void ReportProgress(Action<int>? progressCallback, int processed, int total)
+        {
+            if (progressCallback == null || total == 0)
+                return;
+
+            int percent = (int)((processed / (double)total) * 95);
+            progressCallback(percent);
+        }
+
+        private static string GetTypeDisplayName(CityObjectType type)
+        {
+            return type switch
+            {
+                CityObjectType.Road => "道路",
+                CityObjectType.Bridge => "橋",
+                CityObjectType.All => "建物・道路",
+                _ => "建物"
+            };
+        }
         /// <summary>
         /// 建物要素内の最高LODレベルを取得
         /// </summary>
@@ -379,24 +656,25 @@ namespace PlateauRevitImporter
             return new XYZ(x, y, height);
         }
 
+
         /// <summary>
         /// すべての建物の座標からバウンディングボックスの最小点を計算
         /// X/Y/Z すべて最小値を使用（南西の角 + 地面レベル）
         /// これにより、オフセット後も建物の相対的な位置関係が保持される
         /// </summary>
-        public static XYZ CalculateBoundingBoxMin(List<BuildingGeometry> buildings)
+        public static XYZ CalculateBoundingBoxMin(List<CityObjectGeometry> cityObjects)
         {
-            if (buildings.Count == 0)
-                throw new ArgumentException("建物データが空です");
+            if (cityObjects.Count == 0)
+                throw new ArgumentException("地物ジオメトリが空です");
 
             double minX = double.MaxValue;
             double minY = double.MaxValue;
             double minZ = double.MaxValue;
             int totalPoints = 0;
 
-            foreach (var building in buildings)
+            foreach (var cityObject in cityObjects)
             {
-                foreach (var surface in building.Surfaces)
+                foreach (var surface in cityObject.Surfaces)
                 {
                     foreach (var point in surface)
                     {
@@ -412,9 +690,8 @@ namespace PlateauRevitImporter
                 throw new ArgumentException("有効な座標点が見つかりません");
 
 #if DEBUG
-            // デバッグ: 計算されたバウンディングボックス最小点をログ出力
-            System.Diagnostics.Debug.WriteLine($"");
-            System.Diagnostics.Debug.WriteLine($"=== バウンディングボックス最小点（メートル単位） ===");
+            System.Diagnostics.Debug.WriteLine("");
+            System.Diagnostics.Debug.WriteLine("=== バウンディングボックス最小点（メートル単位） ===");
             System.Diagnostics.Debug.WriteLine($"X={minX:F2}m, Y={minY:F2}m, Z={minZ:F2}m");
             System.Diagnostics.Debug.WriteLine($"総頂点数: {totalPoints}");
 #endif
@@ -423,3 +700,7 @@ namespace PlateauRevitImporter
         }
     }
 }
+
+
+
+

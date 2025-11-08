@@ -77,20 +77,23 @@ namespace PlateauRevitImporter
         public static CoordinateOffset CalculateNewOffset(CityGMLParser.XYZ bboxMin)
         {
             // 注意: bboxMinは既に参照点からの相対座標（メートル単位）
-            // オフセット = 0 で、すべてのインポートが同じ座標系を使用
-            // 初回も追加も同じ原点になる
-            var offset = new CoordinateOffset(0, 0, 0);
+            // XY座標: オフセット = 0 で、すべてのインポートが同じ座標系を使用
+            // Z座標: バウンディングボックスの最小値を引いて地面レベルを0にする
+            var offset = new CoordinateOffset(0, 0, -bboxMin.Z);
 
 #if DEBUG
             // デバッグ: 計算されたオフセットをログ出力
             System.Diagnostics.Debug.WriteLine($"=== 計算されたオフセット（固定参照点方式） ===");
             System.Diagnostics.Debug.WriteLine($"X={offset.OffsetX:F2}m, Y={offset.OffsetY:F2}m, Z={offset.OffsetZ:F2}m");
             System.Diagnostics.Debug.WriteLine($"参照点からの相対座標を直接使用（追加インポート対応）");
+            System.Diagnostics.Debug.WriteLine($"Z座標: バウンディングボックス最小値={bboxMin.Z:F2}mを引いて地面レベルを0に調整");
             System.Diagnostics.Debug.WriteLine($"");
 #endif
 
             return offset;
         }
+
+        private static int debugOffsetCount = 0;
 
         /// <summary>
         /// オフセットを適用して座標を変換
@@ -103,6 +106,15 @@ namespace PlateauRevitImporter
             double x = (originalPoint.X + offset.OffsetX) * metersToFeet;
             double y = (originalPoint.Y + offset.OffsetY) * metersToFeet;
             double z = (originalPoint.Z + offset.OffsetZ) * metersToFeet;
+
+#if DEBUG
+            // デバッグ: 最初の数点のオフセット適用を確認
+            if (debugOffsetCount < 5)
+            {
+                System.Diagnostics.Debug.WriteLine($"ApplyOffset #{debugOffsetCount}: 元座標Z={originalPoint.Z:F2}m, オフセットZ={offset.OffsetZ:F2}m → 結果Z={z:F2}ft");
+                debugOffsetCount++;
+            }
+#endif
 
             return new XYZ(x, y, z);
         }

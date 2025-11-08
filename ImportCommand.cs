@@ -45,6 +45,35 @@ namespace PlateauRevitImporter
                 long fileSizeBytes = new FileInfo(gmlFilePath).Length;
                 double fileSizeMB = fileSizeBytes / (1024.0 * 1024.0);
 
+                // インポート対象タイプ選択
+                TaskDialog typeDialog = new TaskDialog("インポート対象選択");
+                typeDialog.MainInstruction = "インポートするCityGML地物を選択してください";
+                typeDialog.MainContent = "建物のみ / 道路のみ / 建物と道路の両方から選べます。";
+                typeDialog.CommonButtons = TaskDialogCommonButtons.Cancel;
+                typeDialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink1, "建物 (Building)");
+                typeDialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, "道路 (Road)");
+                typeDialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink3, "建物 + 道路");
+
+                TaskDialogResult typeResult = typeDialog.Show();
+                if (typeResult == TaskDialogResult.Cancel)
+                {
+                    return Result.Cancelled;
+                }
+
+                CityGMLParser.CityObjectType targetType = typeResult switch
+                {
+                    TaskDialogResult.CommandLink2 => CityGMLParser.CityObjectType.Road,
+                    TaskDialogResult.CommandLink3 => CityGMLParser.CityObjectType.All,
+                    _ => CityGMLParser.CityObjectType.Building
+                };
+
+                string targetTypeLabel = targetType switch
+                {
+                    CityGMLParser.CityObjectType.Road => "道路",
+                    CityGMLParser.CityObjectType.All => "建物・道路",
+                    _ => "地物"
+                };
+
                 // LOD選択ダイアログを表示
                 TaskDialog lodDialog = new TaskDialog("LOD選択");
                 lodDialog.MainInstruction = "インポートする詳細度を選択してください";
@@ -70,7 +99,7 @@ namespace PlateauRevitImporter
                 int targetLod = (lodResult == TaskDialogResult.CommandLink1) ? 1 : 2;
 
                 // ステップ2: CityGMLファイルを解析（進捗バー付き）
-                List<CityGMLParser.BuildingGeometry> buildings;
+                List<CityGMLParser.CityObjectGeometry> cityObjects;
 
                 // プログレスウィンドウを常に表示
                 ProgressWindow? progressWindow = null;
@@ -118,7 +147,7 @@ namespace PlateauRevitImporter
                     };
 
                     // ダイアログを表示せず、直接解析を開始（選択されたLODを渡す）
-                    buildings = CityGMLParser.ParseCityGML(gmlFilePath, parseProgressCallback, targetLod);
+                                    cityObjects = CityGMLParser.ParseCityGML(gmlFilePath, targetType, parseProgressCallback, targetLod);
 
                     // 解析完了（95%）
                     progressWindow?.Dispatcher.Invoke(() =>
@@ -163,13 +192,13 @@ namespace PlateauRevitImporter
                     return Result.Failed;
                 }
 
-                if (buildings.Count == 0)
+                if (cityObjects.Count == 0)
                 {
                     // プログレスウィンドウを閉じる
                     progressWindow?.Dispatcher.InvokeShutdown();
                     progressThread?.Join();
 
-                    TaskDialog.Show("警告", "建物データが見つかりませんでした。");
+                    TaskDialog.Show("警告", $"{targetTypeLabel}データが見つかりませんでした。");
                     return Result.Failed;
                 }
 
@@ -192,12 +221,16 @@ namespace PlateauRevitImporter
                 }
                 else
                 {
-#if DEBUG
                     // 初回インポート: 新しいオフセットを計算
-                    System.Diagnostics.Debug.WriteLine("初回インポート: 新しいオフセットを計算");
-#endif
-                    CityGMLParser.XYZ bboxMin = CityGMLParser.CalculateBoundingBoxMin(buildings);
+                    CityGMLParser.XYZ bboxMin = CityGMLParser.CalculateBoundingBoxMin(cityObjects);
+
+                    // デバッグ情報を一時保存（完了メッセージで表示）
+                    System.Diagnostics.Debug.WriteLine($"初回インポート: バウンディングボックス最小値 Z={bboxMin.Z:F2}m");
+
                     offset = CoordinateConverter.CalculateNewOffset(bboxMin);
+
+                    System.Diagnostics.Debug.WriteLine($"計算されたオフセット: X={offset.OffsetX:F2}m, Y={offset.OffsetY:F2}m, Z={offset.OffsetZ:F2}m");
+
                     isAdditionalImport = false;
                 }
 
@@ -222,12 +255,12 @@ namespace PlateauRevitImporter
                                 if (progressWindow?.Dispatcher != null && !progressWindow.Dispatcher.HasShutdownStarted)
                                 {
                                     int totalPercent = 95 + (percent / 20); // 95% + (0-5%)
-                                    int processedCount = (int)(percent * buildings.Count / 100.0);
+                                    int processedCount = (int)(percent * cityObjects.Count / 100.0);
                                     progressWindow.Dispatcher.BeginInvoke(() =>
                                     {
                                         progressWindow.UpdateProgress(
                                             totalPercent,
-                                            $"ジオメトリ生成中... {processedCount} / {buildings.Count} 建物"
+                                            $"ジオメトリ生成中... {processedCount} / {cityObjects.Count} 地物"
                                         );
                                     });
                                 }
@@ -241,7 +274,7 @@ namespace PlateauRevitImporter
                         // DirectShape生成
                         shapes = GeometryBuilder.CreateDirectShapes(
                             doc,
-                            buildings,
+                            cityObjects,
                             offset,
                             category.Id,
                             buildProgress
@@ -261,15 +294,18 @@ namespace PlateauRevitImporter
                         progressThread?.Join();
 
                         // ステップ5: 完了メッセージ（エラーログ付き）
-                        string importType = isAdditionalImport ? "追加インポート" : "初回インポート";
+                        string importType = isAdditionalImport ? "追加インポート" : "新規インポート";
+                        int buildingResultCount = cityObjects.Count(obj => obj.Type == CityGMLParser.CityObjectType.Building);
+                        int roadResultCount = cityObjects.Count(obj => obj.Type == CityGMLParser.CityObjectType.Road);
 
-                        string completionMessage = $"✓ インポート完了\n\n" +
+                        string completionMessage = $"インポート完了\n\n" +
                                                   $"ファイル: {fileName}\n" +
                                                   $"サイズ: {fileSizeMB:F2} MB\n" +
-                                                  $"種別: {importType}\n" +
-                                                  $"建物数: {buildings.Count}\n" +
-                                                  $"生成: {shapes.Count} オブジェクト";
-
+                                                  $"モード: {importType}\n" +
+                                                  $"対象: {targetTypeLabel}\n" +
+                                                  $"地物数: {cityObjects.Count} (建物: {buildingResultCount}, 道路: {roadResultCount})\n" +
+                                                  $"生成: {shapes.Count} DirectShape\n" +
+                                                  $"Zオフセット: {offset.OffsetZ:F2}m";
                         if (GeometryBuilder.ErrorLog.Count > 0)
                         {
                             completionMessage += $"\n\n⚠ 警告: {GeometryBuilder.ErrorLog.Count}件のエラー";
@@ -311,3 +347,10 @@ namespace PlateauRevitImporter
         }
     }
 }
+
+
+
+
+
+
+

@@ -1,4 +1,4 @@
-using Autodesk.Revit.DB;
+﻿using Autodesk.Revit.DB;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -16,9 +16,11 @@ namespace PlateauRevitImporter
         /// <summary>
         /// 建物データからDirectShapeを生成してRevitドキュメントに追加
         /// </summary>
+        /// CityGML地物ジオメトリからDirectShapeを生成してRevitドキュメントに追加
+        /// </summary>
         public static List<DirectShape> CreateDirectShapes(
             Document doc,
-            List<CityGMLParser.BuildingGeometry> buildings,
+            List<CityGMLParser.CityObjectGeometry> cityObjects,
             CoordinateConverter.CoordinateOffset offset,
             ElementId categoryId,
             IProgress<int>? progress = null)
@@ -27,57 +29,50 @@ namespace PlateauRevitImporter
             List<DirectShape> createdShapes = new List<DirectShape>();
             int processedCount = 0;
 
-            foreach (var building in buildings)
+            foreach (var cityObject in cityObjects)
             {
                 try
                 {
-                    // DirectShapeを作成
                     DirectShape directShape = DirectShape.CreateElement(doc, categoryId);
 
-                    // Building IDをサニタイズ（Revitの名前制限に対応）
-                    string sanitizedId = SanitizeBuildingId(building.BuildingId);
-                    directShape.Name = $"PLATEAU_{sanitizedId}";
+                    string sanitizedId = SanitizeObjectId(cityObject.ObjectId);
+                    directShape.Name = cityObject.Type switch
+                    {
+                        CityGMLParser.CityObjectType.Road => $"PLATEAU_Road_{sanitizedId}",
+                        CityGMLParser.CityObjectType.Building => $"PLATEAU_Building_{sanitizedId}",
+                        _ => $"PLATEAU_{sanitizedId}"
+                    };
 
-                    // ジオメトリを構築（建物全体を1つのビルダーで処理）
-                    List<GeometryObject> geometries = CreateBuildingGeometry(building, offset);
+                    List<GeometryObject> geometries = CreateCityObjectGeometry(cityObject, offset);
                     int surfaceCount = geometries.Count;
-                    int failedSurfaceCount = building.Surfaces.Count - surfaceCount;
+                    int failedSurfaceCount = cityObject.Surfaces.Count - surfaceCount;
 
-                    // DirectShapeにジオメトリを設定
                     if (geometries.Count > 0)
                     {
                         directShape.SetShape(geometries);
-
-                        // サブカテゴリを設定（PLATEAUモデルとして識別）
-                        SetPlateauSubcategory(doc, directShape);
-
-                        // オフセット情報を保存
+                        SetPlateauSubcategory(doc, directShape, cityObject.Type);
                         CoordinateConverter.SaveOffsetToElement(directShape, offset);
-
                         createdShapes.Add(directShape);
                     }
                     else
                     {
-                        // ジオメトリが1つも生成できなかった場合は削除
                         doc.Delete(directShape.Id);
-                        ErrorLog.Add($"建物 {sanitizedId}: すべての面の生成に失敗");
+                        ErrorLog.Add($"CityObject {sanitizedId}: すべての面の生成に失敗しました");
                     }
 
                     if (failedSurfaceCount > 0)
                     {
-                        ErrorLog.Add($"建物 {sanitizedId}: {failedSurfaceCount}/{building.Surfaces.Count} 面の生成に失敗");
+                        ErrorLog.Add($"CityObject {sanitizedId}: {failedSurfaceCount}/{cityObject.Surfaces.Count} 面の生成に失敗しました");
                     }
                 }
                 catch (Exception ex)
                 {
-                    // 個別の建物のエラーをログに記録
-                    ErrorLog.Add($"建物 {building.BuildingId}: {ex.Message}");
-                    System.Diagnostics.Debug.WriteLine($"建物 {building.BuildingId} の生成に失敗: {ex.Message}");
+                    ErrorLog.Add($"{cityObject.Type} {cityObject.ObjectId}: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"{cityObject.Type} {cityObject.ObjectId} の生成に失敗: {ex.Message}");
                 }
 
-                // プログレス報告
                 processedCount++;
-                progress?.Report((int)((double)processedCount / buildings.Count * 100));
+                progress?.Report((int)((double)processedCount / cityObjects.Count * 100));
             }
 
             return createdShapes;
@@ -86,58 +81,68 @@ namespace PlateauRevitImporter
         /// <summary>
         /// DirectShapeにPLATEAUサブカテゴリを設定
         /// </summary>
-        private static void SetPlateauSubcategory(Document doc, DirectShape directShape)
+        private static void SetPlateauSubcategory(
+            Document doc,
+            DirectShape directShape,
+            CityGMLParser.CityObjectType type)
         {
             try
             {
-                // 汎用モデルカテゴリを取得
-                Category genericModelCategory = doc.Settings.Categories.get_Item(BuiltInCategory.OST_GenericModel);
-
-                // PLATEAUサブカテゴリを取得
-                Category? plateauSubCategory = null;
-                foreach (Category subCat in genericModelCategory.SubCategories)
+                string subCategoryName = type switch
                 {
-                    if (subCat.Name == CoordinateConverter.PlateauCategoryName)
-                    {
-                        plateauSubCategory = subCat;
-                        break;
-                    }
-                }
+                    CityGMLParser.CityObjectType.Road => "PLATEAU_Road",
+                    CityGMLParser.CityObjectType.Bridge => "PLATEAU_Bridge",
+                    _ => CoordinateConverter.PlateauCategoryName
+                };
 
-                // サブカテゴリをパラメータで設定
-                if (plateauSubCategory != null)
+                Category? targetSubCategory = GetOrCreateSubCategory(doc, subCategoryName);
+                if (targetSubCategory != null)
                 {
                     Parameter? param = directShape.get_Parameter(BuiltInParameter.FAMILY_ELEM_SUBCATEGORY);
                     if (param != null && !param.IsReadOnly)
                     {
-                        param.Set(plateauSubCategory.Id);
+                        param.Set(targetSubCategory.Id);
                     }
                 }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"サブカテゴリ設定エラー: {ex.Message}");
-                // サブカテゴリ設定に失敗しても続行
             }
+        }
+        private static Category? GetOrCreateSubCategory(Document doc, string subCategoryName)
+        {
+            Category genericModelCategory = doc.Settings.Categories.get_Item(BuiltInCategory.OST_GenericModel);
+            Category? subCategory = null;
+            foreach (Category subCat in genericModelCategory.SubCategories)
+            {
+                if (subCat.Name == subCategoryName)
+                {
+                    subCategory = subCat;
+                    break;
+                }
+            }
+
+            subCategory ??= doc.Settings.Categories.NewSubcategory(genericModelCategory, subCategoryName);
+            return subCategory;
         }
 
         /// <summary>
         /// Building IDをRevitの名前規則に適合するようサニタイズ
         /// </summary>
-        private static string SanitizeBuildingId(string buildingId)
+        /// CityGML IDをRevitの命名規則に適合させる
+        /// </summary>
+        private static string SanitizeObjectId(string sourceId)
         {
-            // 不正な文字を除去
-            string sanitized = new string(buildingId
+            string sanitized = new string(sourceId
                 .Where(c => char.IsLetterOrDigit(c) || c == '_' || c == '-')
                 .ToArray());
 
-            // 長すぎる場合は短縮
             if (sanitized.Length > 100)
             {
                 sanitized = sanitized.Substring(0, 100);
             }
 
-            // 空の場合はGUIDを使用
             if (string.IsNullOrEmpty(sanitized))
             {
                 sanitized = Guid.NewGuid().ToString().Substring(0, 8);
@@ -149,25 +154,24 @@ namespace PlateauRevitImporter
         /// <summary>
         /// 建物全体のジオメトリを作成（各面を個別のMeshとして処理）
         /// </summary>
-        private static List<GeometryObject> CreateBuildingGeometry(
-            CityGMLParser.BuildingGeometry building,
+        /// 地物ジオメトリをDirectShape用のGeometryObjectに変換
+        /// </summary>
+        private static List<GeometryObject> CreateCityObjectGeometry(
+            CityGMLParser.CityObjectGeometry cityObject,
             CoordinateConverter.CoordinateOffset offset)
         {
             List<GeometryObject> geometries = new List<GeometryObject>();
             int successfulSurfaces = 0;
             int failedSurfaces = 0;
 
-            // 各面を個別のメッシュとして処理
-            foreach (var surface in building.Surfaces)
+            foreach (var surface in cityObject.Surfaces)
             {
                 try
                 {
-                    // 座標変換を適用
                     List<XYZ> convertedPoints = surface
                         .Select(p => CoordinateConverter.ApplyOffset(p, offset))
                         .ToList();
 
-                    // ジオメトリを作成
                     GeometryObject? geom = CreateMeshFromPoints(convertedPoints);
                     if (geom != null)
                     {
@@ -182,11 +186,11 @@ namespace PlateauRevitImporter
                 catch (Exception ex)
                 {
                     failedSurfaces++;
-                    System.Diagnostics.Debug.WriteLine($"面の処理失敗: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"面の処理に失敗: {ex.Message}");
                 }
             }
 
-            System.Diagnostics.Debug.WriteLine($"建物 {building.BuildingId}: 成功={successfulSurfaces}, 失敗={failedSurfaces}");
+            System.Diagnostics.Debug.WriteLine($"{cityObject.Type} {cityObject.ObjectId}: 成功={successfulSurfaces}, 失敗={failedSurfaces}");
 
             return geometries;
         }
@@ -563,3 +567,8 @@ namespace PlateauRevitImporter
         }
     }
 }
+
+
+
+
+
